@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## 2026-06-13
+
+### Security
+
+- Updated dependencies to resolve security vulnerabilities.
+
+## 2026-06-12
+
+### Changed
+
+- Enabled WAV file output by default (`save_wav: true`).
+
+## 2026-04-13
+
 ### Changed
 
 - Renamed `just run` to `just chat` across justfile, README, and CLAUDE.md
