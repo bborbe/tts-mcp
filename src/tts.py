@@ -397,6 +397,52 @@ def audio_worker(
         play_chunks(pending_chunks, output_path, sample_rate)
 
 
+def audio_worker_from_model_id(
+    work_queue: queue.Queue[str | None],
+    model_id: str,
+    voice: str,
+    output_path: Path | None,
+    sample_rate: int,
+    normalize_audio: bool,
+    target_lufs: float,
+    true_peak_ceiling_db: float,
+    min_duration_seconds: float,
+    meter: pyln.Meter,
+    ready_queue: queue.Queue[BaseException | None] | None,
+) -> None:
+    """Load the model in the worker thread, then process queued TTS work.
+
+    MLX GPU streams are thread-local. Loading the model and calling generate on
+    different Python threads can raise "no Stream(gpu, N) in current thread".
+    """
+    try:
+        model = load(model_id)
+        if not hasattr(model, "generate") or model.generate is None:
+            msg = f"Model {model_id} does not support generation"
+            raise RuntimeError(msg)
+    except BaseException as exc:
+        if ready_queue is None:
+            raise
+        ready_queue.put(exc)
+        return
+
+    if ready_queue is not None:
+        ready_queue.put(None)
+
+    audio_worker(
+        work_queue,
+        model,
+        voice,
+        output_path,
+        sample_rate,
+        normalize_audio,
+        target_lufs,
+        true_peak_ceiling_db,
+        min_duration_seconds,
+        meter,
+    )
+
+
 def make_output_path(output_dir: Path) -> Path:
     """Generate a timestamped output path for a new audio file.
 

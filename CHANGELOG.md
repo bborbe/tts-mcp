@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed CLI playback failure on current MLX by loading models inside worker threads.
+
 ## 2026-06-13
 
 ### Security

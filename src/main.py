@@ -11,11 +11,10 @@ import tty
 from pathlib import Path
 
 import pyloudnorm as pyln
-from mlx_audio.tts.utils import load
 
 from src.tts import (
     OUTPUT_DIR,
-    audio_worker,
+    audio_worker_from_model_id,
     clean_text,
     discover_models,
     discover_voices,
@@ -320,25 +319,18 @@ def main() -> None:
         sys.exit(1)
 
     print(f"\nLoading model: {model_dir}")
-    model = load(model_dir)
-
-    if not hasattr(model, "generate") or model.generate is None:
-        print(f"Error: model {model_dir} does not support generation", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Voice: {voice}")
-    print("Type text. Enter twice submits (single Enter = newline). Enter twice on empty input or ESC twice quits.\n")
 
     output_path = make_output_path(OUTPUT_DIR) if save_wav else None
     work_queue: queue.Queue[str | None] = queue.Queue()
+    ready_queue: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
 
     meter = pyln.Meter(float(sample_rate))
 
     worker = threading.Thread(
-        target=audio_worker,
+        target=audio_worker_from_model_id,
         args=(
             work_queue,
-            model,
+            model_dir,
             voice,
             output_path,
             sample_rate,
@@ -347,10 +339,19 @@ def main() -> None:
             normalization.true_peak_ceiling_db,
             normalization.min_duration_seconds,
             meter,
+            ready_queue,
         ),
         daemon=True,
     )
     worker.start()
+
+    load_error = ready_queue.get()
+    if load_error is not None:
+        print(f"Error: {load_error}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Voice: {voice}")
+    print("Type text. Enter twice submits (single Enter = newline). Enter twice on empty input or ESC twice quits.\n")
 
     if args.text:
         text = prepare_text(args.text, simplify_punct)

@@ -23,7 +23,7 @@ All configuration is explicit — no hardcoded defaults, no silent fallbacks. If
 
 ## Architecture
 
-There are two independent entry paths into the system. The interactive CLI (`src/main.py`) loads the model in-process and talks to the shared TTS engine directly. The FastAPI server (`src/server.py`) loads the model once at startup and serializes all requests through a work queue and a background audio worker with lookahead generation. AI agents reach the server through the MCP relay (`mcp/tts-mcp.ts`), a thin stdio-to-HTTP bridge; any plain HTTP client can call the REST API directly. In both paths, inference runs on the Apple Silicon GPU via MLX (Metal), with the Voxtral model weights held in unified memory.
+There are two independent entry paths into the system. The interactive CLI (`src/main.py`) resolves the model and voice, then starts a worker that loads the model and runs generation on the same thread. The FastAPI server (`src/server.py`) loads the model once at startup and serializes all requests through a work queue and a background audio worker with lookahead generation. AI agents reach the server through the MCP relay (`mcp/tts-mcp.ts`), a thin stdio-to-HTTP bridge; any plain HTTP client can call the REST API directly. In both paths, inference runs on the Apple Silicon GPU via MLX (Metal), with the Voxtral model weights held in unified memory.
 
 ```text
 ┌───────────────────────────┐  ┌───────────────────────────┐  ┌───────────────────────────┐
@@ -36,9 +36,9 @@ There are two independent entry paths into the system. The interactive CLI (`src
 │   MCP Server (Node.js)    │                │                │     CLI · src/main.py     │
 │      mcp/tts-mcp.ts       │                │                │     interactive chat      │
 │  tools: say, get_voices,  │                │                │  model & voice selection  │
-│        get_status         │                │                └─────────────┬─────────────┘
-└─────────────┬─────────────┘                │                              │
-              │ HTTP                         │                              │
+│        get_status         │                │                │  queue text to worker     │
+└─────────────┬─────────────┘                │                └─────────────┬─────────────┘
+              │ HTTP                         │                              │ model path + text
               ▼                              ▼                              │
 ┌─────────────┬──────────────────────────────┬───────────────┐              │
 │               FastAPI Server · src/server.py               │              │
@@ -54,10 +54,11 @@ There are two independent entry paths into the system. The interactive CLI (`src
 ┌──────────────────────┐            ┌─────────────┬─────────────────────────┬──────────────┐
 │  Apple Silicon GPU   │            │            Shared TTS Engine · src/tts.py            │
 │    Metal via MLX     │            │                                                      │
-│                      │◀── text ───│   streaming generation                               │
-│ Voxtral 4B TTS model │── audio ──▶│             │                                        │
-│ 4-bit / 6-bit / bf16 │            │             ▼                                        │
-│    unified memory    │            │   loudness normalization (pyloudnorm · BS.1770-4)    │
+│                      │◀── text ───│   worker-thread generation                           │
+│ Voxtral 4B TTS model │── audio ──▶│   CLI worker loads model before generate             │
+│ 4-bit / 6-bit / bf16 │            │             │                                        │
+│    unified memory    │            │             ▼                                        │
+│                      │            │   loudness normalization (pyloudnorm · BS.1770-4)    │
 └──────────────────────┘            │             │                                        │
                                     │             ├────────────────────────┐               │
                                     │             ▼                        ▼               │
