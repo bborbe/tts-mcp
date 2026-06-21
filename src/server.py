@@ -16,6 +16,7 @@ from typing import cast
 import numpy as np
 import pyloudnorm as pyln
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from mlx_audio.tts.utils import load
 from pydantic import BaseModel
 
 from src.tts import (
@@ -62,7 +63,8 @@ class ServerState:
 
     def __init__(
         self,
-        model: TTSModel,
+        model: TTSModel | None,
+        model_path: str,
         voices: list[str],
         default_voice: str,
         sample_rate: int,
@@ -77,7 +79,11 @@ class ServerState:
         """Initialize server state.
 
         Args:
-            model: Loaded TTS model.
+            model: Pre-loaded TTS model, or None to have the audio worker load
+                it on its own thread. MLX GPU streams are thread-local, so the
+                model must be loaded on the same thread that calls generate.
+            model_path: Filesystem path to the model, used by the audio worker
+                to load the model on its own thread when model is None.
             voices: Available voice names.
             default_voice: Default voice for requests without voice override.
             sample_rate: Audio sample rate in Hz.
@@ -89,7 +95,8 @@ class ServerState:
             min_duration_seconds: Minimum utterance length to attempt normalization.
             meter: Pre-constructed pyloudnorm Meter matching sample_rate.
         """
-        self.model = model
+        self.model: TTSModel | None = model
+        self.model_path = model_path
         self.voices = voices
         self.default_voice = default_voice
         self.sample_rate = sample_rate
@@ -101,6 +108,7 @@ class ServerState:
         self.min_duration_seconds = min_duration_seconds
         self.meter = meter
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
+        self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
         self.status_lock = threading.Lock()
         self._counter = 0
@@ -328,8 +336,73 @@ def _start_playback(
     return thread
 
 
+def _load_worker_model(state: ServerState) -> TTSModel | None:
+    """Load the model on the calling (worker) thread if not already loaded.
+
+    MLX GPU streams are thread-local, so the model must be loaded on the same
+    thread that later calls generate; loading on one thread and generating on
+    another raises "no Stream(gpu, N) in current thread" (the same failure
+    fixed for the CLI in audio_worker_from_model_id). The load outcome is
+    reported through state.ready_queue so startup failures surface on the
+    caller's thread.
+
+    Args:
+        state: Server state holding the (optional) model and its path.
+
+    Returns:
+        The loaded model, or None if loading failed.
+    """
+    model = state.model
+    if model is None:
+        try:
+            model = load(state.model_path)
+            if not hasattr(model, "generate") or model.generate is None:
+                msg = f"Model {state.model_path} does not support generation"
+                raise RuntimeError(msg)
+            state.model = model
+        except BaseException as exc:
+            logger.error("Model load failed in audio worker: %s", exc)
+            state.ready_queue.put(exc)
+            return None
+    state.ready_queue.put(None)
+    return model
+
+
+def _generate_item(state: ServerState, model: TTSModel, item: WorkItem) -> list[np.ndarray] | None:
+    """Generate and optionally normalize audio chunks for one work item.
+
+    Args:
+        state: Server state with normalization settings and meter.
+        model: Loaded TTS model (loaded on the worker thread).
+        item: Work item to synthesize.
+
+    Returns:
+        Audio chunks for the item, or None if generation failed (the failure is
+        recorded on the item's status).
+    """
+    try:
+        chunks = generate_chunks(model, item.text, item.voice)
+        if state.normalize_audio and chunks:
+            chunks = normalize_chunks(
+                chunks,
+                state.sample_rate,
+                state.target_lufs,
+                state.true_peak_ceiling_db,
+                state.min_duration_seconds,
+                state.meter,
+            )
+        return chunks
+    except (RuntimeError, ValueError) as exc:
+        logger.error("TTS generation failed for %s: %s", item.message_id, exc)
+        _fail_item(state, item.message_id, str(exc))
+        return None
+
+
 def server_audio_worker(state: ServerState) -> None:
     """Background worker that processes queued TTS requests sequentially.
+
+    Loads the model on this thread when it was not pre-loaded (see
+    _load_worker_model), because MLX GPU streams are thread-local.
 
     Uses lookahead pattern: generates chunks for the next message while
     the current one is still playing.  Wraps each iteration in a top-level
@@ -339,6 +412,10 @@ def server_audio_worker(state: ServerState) -> None:
     Args:
         state: Server state with work queue, model, and status tracking.
     """
+    model = _load_worker_model(state)
+    if model is None:
+        return
+
     pending: tuple[WorkItem, list[np.ndarray]] | None = None
     playback_thread: threading.Thread | None = None
 
@@ -357,21 +434,9 @@ def server_audio_worker(state: ServerState) -> None:
 
             current_item = item
 
-            try:
-                chunks = generate_chunks(state.model, item.text, item.voice)
-                if state.normalize_audio and chunks:
-                    chunks = normalize_chunks(
-                        chunks,
-                        state.sample_rate,
-                        state.target_lufs,
-                        state.true_peak_ceiling_db,
-                        state.min_duration_seconds,
-                        state.meter,
-                    )
+            chunks = _generate_item(state, model, item)
+            if chunks is not None:
                 pending = (item, chunks)
-            except (RuntimeError, ValueError) as exc:
-                logger.error("TTS generation failed for %s: %s", item.message_id, exc)
-                _fail_item(state, item.message_id, str(exc))
 
             state.work_queue.task_done()
 
@@ -442,21 +507,20 @@ def _parse_server_config() -> _ServerConfig:
 
 
 def _build_server_state(cfg: _ServerConfig) -> ServerState:
-    """Load the MLX model and assemble a ServerState from parsed config."""
-    from mlx_audio.tts.utils import load
+    """Assemble a ServerState from parsed config.
 
+    The MLX model is intentionally not loaded here. It is loaded by the audio
+    worker on its own thread (see server_audio_worker), because MLX GPU streams
+    are thread-local.
+    """
     available_voices = discover_voices(Path(cfg.model_path))
     if cfg.default_voice not in available_voices:
         msg = f"default_voice '{cfg.default_voice}' not found. Available: {', '.join(available_voices)}"
         raise ValueError(msg)
 
-    model = load(cfg.model_path)
-    if not hasattr(model, "generate") or model.generate is None:
-        msg = f"Model {cfg.model_path} does not support generation"
-        raise RuntimeError(msg)
-
     return ServerState(
-        model=cast(TTSModel, model),
+        model=None,
+        model_path=cfg.model_path,
         voices=available_voices,
         default_voice=cfg.default_voice,
         sample_rate=cfg.sample_rate,
@@ -472,11 +536,21 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    """Load model on startup, shut down worker on exit."""
+    """Start the audio worker, wait for its in-thread model load, then shut it down on exit.
+
+    The audio worker loads the model on its own thread (MLX GPU streams are
+    thread-local) and reports the load outcome via state.ready_queue. Startup
+    blocks here until that signal arrives so model-load failures surface
+    cleanly instead of after startup completes.
+    """
     state = _build_server_state(_parse_server_config())
 
     worker = threading.Thread(target=server_audio_worker, args=(state,), daemon=True)
     worker.start()
+
+    load_error = state.ready_queue.get()
+    if load_error is not None:
+        raise load_error
 
     app.state.server = state
 

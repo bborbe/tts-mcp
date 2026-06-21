@@ -32,15 +32,23 @@ def _make_state(
     true_peak_ceiling_db: float = -1.0,
     min_duration_seconds: float = 0.5,
     meter: pyln.Meter | None = None,
+    preload_model: bool = True,
+    model_path: str = "test-model-path",
 ) -> ServerState:
-    """Create a ServerState with a mock model for testing."""
-    model = MagicMock()
+    """Create a ServerState for testing.
+
+    By default a mock model is pre-loaded (preload_model=True). Pass
+    preload_model=False to leave state.model as None so the worker loads it
+    on its own thread, mirroring the production code path.
+    """
+    model = MagicMock() if preload_model else None
     if voices is None:
         voices = ["casual_female", "casual_male"]
     if meter is None:
         meter = pyln.Meter(float(sample_rate))
     return ServerState(
         model=model,
+        model_path=model_path,
         voices=voices,
         default_voice=default_voice,
         sample_rate=sample_rate,
@@ -561,6 +569,96 @@ class TestServerAudioWorker:
             error = state.statuses[msg_id].error
             assert error is not None
             assert "Audio device error" in error
+
+    @patch("src.server.play_chunks")
+    @patch("src.server.load")
+    def test_loads_model_on_worker_thread_when_not_preloaded(self, mock_load: MagicMock, mock_play: MagicMock) -> None:
+        """Regression: the model must be loaded on the same thread that calls
+        generate, because MLX GPU streams are thread-local. Loading on the main
+        thread and generating on the worker thread raised
+        'no Stream(gpu, 0) in current thread'.
+        """
+        load_thread_id: dict[str, int] = {}
+        generate_thread_id: dict[str, int] = {}
+
+        mock_chunk = MagicMock()
+        mock_chunk.audio = np.ones(100, dtype=np.float32)
+
+        mock_model = MagicMock()
+
+        def fake_generate(text: str, voice: str) -> list[Any]:
+            generate_thread_id["id"] = threading.get_ident()
+            return [mock_chunk]
+
+        mock_model.generate.side_effect = fake_generate
+
+        def fake_load(model_path: str) -> MagicMock:
+            load_thread_id["id"] = threading.get_ident()
+            return mock_model
+
+        mock_load.side_effect = fake_load
+
+        state = _make_state(preload_model=False)
+
+        msg_id = "msg_thread_001"
+        with state.status_lock:
+            state.statuses[msg_id] = MessageStatus(
+                message_id=msg_id,
+                status="queued",
+                text="Hello",
+                audio_file=None,
+                error=None,
+                completed_at=None,
+            )
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        mock_load.assert_called_once_with("test-model-path")
+        assert load_thread_id["id"] == t.ident
+        assert generate_thread_id["id"] == t.ident
+        assert load_thread_id["id"] == generate_thread_id["id"]
+        with state.status_lock:
+            assert state.statuses[msg_id].status == "completed"
+
+    @patch("src.server.play_chunks")
+    @patch("src.server.load")
+    def test_reports_model_load_failure_via_ready_queue(self, mock_load: MagicMock, mock_play: MagicMock) -> None:
+        """A model-load failure on the worker thread is propagated through
+        ready_queue so the main thread (lifespan) can surface it on startup.
+        """
+        mock_load.side_effect = RuntimeError("model load boom")
+
+        state = _make_state(preload_model=False)
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        result = state.ready_queue.get(timeout=1)
+        assert isinstance(result, RuntimeError)
+        assert "model load boom" in str(result)
+
+    @patch("src.server.play_chunks")
+    def test_signals_ready_when_model_preloaded(self, mock_play: MagicMock) -> None:
+        """When a model is pre-loaded, the worker still signals readiness with
+        None so the lifespan startup unblocks.
+        """
+        state = _make_state()
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        assert state.ready_queue.get(timeout=1) is None
 
 
 class TestSaveWavDisabled:
