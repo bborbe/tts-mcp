@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed CLI playback failure on current MLX by loading models inside worker threads.
+- Fixed server TTS failure by loading the model inside the audio worker thread.
 
 ## 2026-06-13
 
