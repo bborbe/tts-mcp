@@ -35,9 +35,9 @@ def _worker_args(
     model: MagicMock,
     voice: str,
     output_path: Path | None,
-) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, bool, float, float, float, pyln.Meter]:
+) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, bool, float, float, float, pyln.Meter, int]:
     """Build the positional args tuple for audio_worker with normalization disabled."""
-    return (work_queue, model, voice, output_path, _SR, False, -20.0, -1.0, 0.5, _TEST_METER)
+    return (work_queue, model, voice, output_path, _SR, False, -20.0, -1.0, 0.5, _TEST_METER, 0)
 
 
 def _make_sine(duration_s: float, freq_hz: float, amplitude: float, sample_rate: int = _SR) -> np.ndarray:
@@ -250,7 +250,7 @@ class TestPlayChunks:
         chunks = [np.ones(100, dtype=np.float32), np.ones(200, dtype=np.float32)]
         output_path = tmp_path / "out.wav"
 
-        play_chunks(chunks, output_path, sample_rate=24000)
+        play_chunks(chunks, output_path, sample_rate=24000, lead_silence_ms=0)
 
         assert mock_stream.write.call_count == 2
         assert output_path.exists()
@@ -263,7 +263,7 @@ class TestPlayChunks:
 
         chunks = [np.ones(100, dtype=np.float32), np.ones(200, dtype=np.float32)]
 
-        play_chunks(chunks, None, sample_rate=24000)
+        play_chunks(chunks, None, sample_rate=24000, lead_silence_ms=0)
 
         assert mock_stream.write.call_count == 2
 

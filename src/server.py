@@ -75,6 +75,7 @@ class ServerState:
         true_peak_ceiling_db: float,
         min_duration_seconds: float,
         meter: pyln.Meter,
+        lead_silence_ms: int,
     ) -> None:
         """Initialize server state.
 
@@ -94,6 +95,8 @@ class ServerState:
             true_peak_ceiling_db: Maximum true-peak level in dBFS after gain.
             min_duration_seconds: Minimum utterance length to attempt normalization.
             meter: Pre-constructed pyloudnorm Meter matching sample_rate.
+            lead_silence_ms: Milliseconds of silence prepended to each utterance
+                during playback to absorb CoreAudio stream-startup latency.
         """
         self.model: TTSModel | None = model
         self.model_path = model_path
@@ -107,6 +110,7 @@ class ServerState:
         self.true_peak_ceiling_db = true_peak_ceiling_db
         self.min_duration_seconds = min_duration_seconds
         self.meter = meter
+        self.lead_silence_ms = lead_silence_ms
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
@@ -271,7 +275,7 @@ def _finish_playback(
         output_path: Path to save the WAV file, or None to skip saving.
     """
     try:
-        play_chunks(chunks, output_path, state.sample_rate)
+        play_chunks(chunks, output_path, state.sample_rate, state.lead_silence_ms)
         with state.status_lock:
             ms = state.statuses[message_id]
             ms.status = "completed"
@@ -468,6 +472,7 @@ class _ServerConfig:
     target_lufs: float
     true_peak_ceiling_db: float
     min_duration_seconds: float
+    lead_silence_ms: int
 
 
 def _require(config: dict[str, object], key: str) -> object:
@@ -503,6 +508,7 @@ def _parse_server_config() -> _ServerConfig:
         target_lufs=float(cast(float, _require(config, "target_lufs"))),
         true_peak_ceiling_db=float(cast(float, _require(config, "true_peak_ceiling_db"))),
         min_duration_seconds=float(cast(float, _require(config, "min_duration_seconds"))),
+        lead_silence_ms=int(cast(int, _require(config, "lead_silence_ms"))),
     )
 
 
@@ -531,6 +537,7 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         true_peak_ceiling_db=cfg.true_peak_ceiling_db,
         min_duration_seconds=cfg.min_duration_seconds,
         meter=pyln.Meter(float(cfg.sample_rate)),
+        lead_silence_ms=cfg.lead_silence_ms,
     )
 
 

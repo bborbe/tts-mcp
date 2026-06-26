@@ -34,6 +34,7 @@ def _make_state(
     meter: pyln.Meter | None = None,
     preload_model: bool = True,
     model_path: str = "test-model-path",
+    lead_silence_ms: int = 0,
 ) -> ServerState:
     """Create a ServerState for testing.
 
@@ -59,6 +60,7 @@ def _make_state(
         true_peak_ceiling_db=true_peak_ceiling_db,
         min_duration_seconds=min_duration_seconds,
         meter=meter,
+        lead_silence_ms=lead_silence_ms,
     )
 
 

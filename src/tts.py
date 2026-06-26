@@ -307,15 +307,30 @@ def normalize_chunks(
     return [part.astype(np.float32, copy=False) for part in out]
 
 
-def play_chunks(chunks: list[np.ndarray], output_path: Path | None, sample_rate: int) -> None:
+def play_chunks(
+    chunks: list[np.ndarray],
+    output_path: Path | None,
+    sample_rate: int,
+    lead_silence_ms: int,
+) -> None:
     """Stream audio chunks to speakers and optionally save to file.
+
+    A lead-in of silence is written to the output stream before the first
+    chunk to absorb CoreAudio device-startup latency that would otherwise
+    clip the first ~200 ms of the utterance. The silence is NOT included in
+    the saved WAV.
 
     Args:
         chunks: List of audio chunks as numpy arrays.
         output_path: Path to save the generated WAV file, or None to skip saving.
         sample_rate: Sample rate in Hz.
+        lead_silence_ms: Milliseconds of leading silence to pre-write to the
+            stream so the audio device is warm before the first chunk plays.
     """
     with sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32") as stream:
+        if lead_silence_ms > 0:
+            silence_frames = int(sample_rate * lead_silence_ms / 1000)
+            stream.write(np.zeros((silence_frames, 1), dtype=np.float32))
         for chunk in chunks:
             stream.write(chunk.reshape(-1, 1))
 
@@ -335,6 +350,7 @@ def audio_worker(
     true_peak_ceiling_db: float,
     min_duration_seconds: float,
     meter: pyln.Meter,
+    lead_silence_ms: int,
 ) -> None:
     """Background worker that generates and plays TTS audio.
 
@@ -364,7 +380,7 @@ def audio_worker(
             pending_chunks = None
             playback_thread = threading.Thread(
                 target=play_chunks,
-                args=(chunks_to_play, output_path, sample_rate),
+                args=(chunks_to_play, output_path, sample_rate, lead_silence_ms),
                 daemon=True,
             )
             playback_thread.start()
@@ -394,7 +410,7 @@ def audio_worker(
     if pending_chunks is not None:
         if playback_thread is not None:
             playback_thread.join()
-        play_chunks(pending_chunks, output_path, sample_rate)
+        play_chunks(pending_chunks, output_path, sample_rate, lead_silence_ms)
 
 
 def audio_worker_from_model_id(
@@ -408,6 +424,7 @@ def audio_worker_from_model_id(
     true_peak_ceiling_db: float,
     min_duration_seconds: float,
     meter: pyln.Meter,
+    lead_silence_ms: int,
     ready_queue: queue.Queue[BaseException | None] | None,
 ) -> None:
     """Load the model in the worker thread, then process queued TTS work.
@@ -440,6 +457,7 @@ def audio_worker_from_model_id(
         true_peak_ceiling_db,
         min_duration_seconds,
         meter,
+        lead_silence_ms,
     )
 
 
