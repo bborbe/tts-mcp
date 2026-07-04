@@ -282,7 +282,15 @@ class PlaybackJob:
 
 
 class AudioPlayer:
-    """Persistent output stream that warms each physical stream open once."""
+    """Serial audio player that opens a fresh output stream per utterance.
+
+    Each job opens a new stream on the current default output device (via
+    _open_stream -> _refresh_audio_devices), plays, and closes it. This makes
+    playback follow the system default even across a switch between two
+    connected devices (no disconnect, so no write error would trigger a
+    warm-stream reopen). _write_lead_silence absorbs the per-open CoreAudio
+    startup clip.
+    """
 
     def __init__(self, sample_rate: int, lead_silence_ms: int) -> None:
         """Initialize the persistent audio player.
@@ -343,14 +351,20 @@ class AudioPlayer:
         finally:
             stream.close()
 
-    def _ensure_stream(self, stream: AudioOutputStream | None) -> AudioOutputStream:
-        if stream is not None:
-            return stream
-        return self._open_stream()
+    def _handle_job(self, job: PlaybackJob) -> None:
+        """Open a fresh stream on the current default device, play, then close.
 
-    def _handle_job(self, stream: AudioOutputStream | None, job: PlaybackJob) -> AudioOutputStream | None:
+        A fresh stream per utterance is what makes playback follow the system
+        default output device. _open_stream re-enumerates devices via
+        _refresh_audio_devices, so switching the default between two *connected*
+        devices — which produces no write error, so a warm stream would keep
+        playing to the old device — still routes to the new default here.
+        _write_lead_silence absorbs the per-open CoreAudio startup clip, so the
+        warm-stream optimization is not needed to avoid clipping.
+        """
+        stream: AudioOutputStream | None = None
         try:
-            stream = self._ensure_stream(stream)
+            stream = self._open_stream()
             for chunk in job.chunks:
                 stream.write(chunk.reshape(-1, 1))
             if job.output_path is not None:
@@ -358,40 +372,26 @@ class AudioPlayer:
                 save_audio(audio, job.output_path, self._sample_rate)
             if job.on_complete is not None:
                 job.on_complete(job.output_path)
-            return stream
         except Exception as exc:
-            close_error: Exception | None = None
-            try:
-                self._close_stream(stream)
-            except Exception as stream_close_error:
-                close_error = stream_close_error
-
-            playback_error = exc
-            if close_error is not None:
-                playback_error = RuntimeError(f"{exc}; additionally failed to close audio stream: {close_error}")
-
             if job.on_error is not None:
-                job.on_error(playback_error)
+                job.on_error(exc)
             else:
-                self._unhandled_errors.put(playback_error)
-            return None
-
-    def _run(self) -> None:
-        stream: AudioOutputStream | None = None
-        try:
-            while True:
-                job = self._jobs.get()
-                try:
-                    if job is None:
-                        break
-                    stream = self._handle_job(stream, job)
-                finally:
-                    self._jobs.task_done()
+                self._unhandled_errors.put(exc)
         finally:
             try:
                 self._close_stream(stream)
-            except Exception as exc:
-                self._unhandled_errors.put(exc)
+            except Exception as close_error:
+                self._unhandled_errors.put(close_error)
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            try:
+                if job is None:
+                    break
+                self._handle_job(job)
+            finally:
+                self._jobs.task_done()
 
 
 def generate_chunks(model: TTSModel, text: str, voice: str) -> list[np.ndarray]:

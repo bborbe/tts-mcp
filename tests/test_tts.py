@@ -274,24 +274,32 @@ class TestPlayChunks:
 
 
 class TestAudioPlayer:
-    """Tests for the persistent AudioPlayer."""
+    """Tests for the per-utterance AudioPlayer."""
 
     @patch("src.tts.sd")
-    def test_writes_lead_silence_once_for_reused_stream(self, mock_sd: MagicMock) -> None:
-        mock_stream = MagicMock()
-        mock_sd.OutputStream.return_value = mock_stream
+    def test_opens_fresh_stream_and_writes_lead_silence_per_job(self, mock_sd: MagicMock) -> None:
+        first_stream = MagicMock()
+        second_stream = MagicMock()
+        mock_sd.OutputStream.side_effect = [first_stream, second_stream]
         player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
 
         player.submit(PlaybackJob(chunks=[np.ones(3, dtype=np.float32)], output_path=None))
         player.submit(PlaybackJob(chunks=[np.ones(4, dtype=np.float32)], output_path=None))
         player.close()
 
-        mock_sd.OutputStream.assert_called_once_with(samplerate=1000, channels=1, dtype="float32")
-        assert mock_stream.start.call_count == 1
-        assert mock_stream.write.call_count == 3
-        silence = mock_stream.write.call_args_list[0].args[0]
+        # A fresh stream is opened per job so playback follows the current default output device.
+        assert mock_sd.OutputStream.call_count == 2
+        assert first_stream.start.call_count == 1
+        assert second_stream.start.call_count == 1
+        # Each open writes lead silence, then the job's single chunk.
+        assert first_stream.write.call_count == 2
+        assert second_stream.write.call_count == 2
+        silence = first_stream.write.call_args_list[0].args[0]
         assert silence.shape == (200, 1)
         assert float(np.max(np.abs(silence))) == 0.0
+        # Each job's stream is closed before the next job opens one.
+        assert first_stream.close.call_count == 1
+        assert second_stream.close.call_count == 1
 
     @patch("src.tts.sd")
     def test_reopens_and_rewarms_after_stream_write_error(self, mock_sd: MagicMock) -> None:
