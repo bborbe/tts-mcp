@@ -241,6 +241,24 @@ def save_audio(audio: np.ndarray, output_path: Path, sample_rate: int) -> None:
         wf.writeframes(audio_int16.tobytes())
 
 
+def _refresh_audio_devices() -> None:
+    """Re-enumerate audio devices so the next stream opens on the current default output.
+
+    PortAudio snapshots the device list when sounddevice is first initialized. A long-lived
+    server process therefore keeps targeting whatever output device was default at startup, and
+    every stream open after the user switches devices fails with CoreAudio error -10851
+    ("Invalid Property Value"). Tearing down and re-initializing PortAudio refreshes the device
+    list so the next open picks up the current default without restarting the process.
+
+    sounddevice exposes PortAudio's teardown/re-init hooks only under underscore-prefixed names
+    (its documented recipe for refreshing the device list), so the module is reached through a
+    dynamically-typed reference here.
+    """
+    sounddevice_module: Any = sd
+    sounddevice_module._terminate()
+    sounddevice_module._initialize()
+
+
 def _write_lead_silence(stream: AudioOutputStream, sample_rate: int, lead_silence_ms: int) -> None:
     if lead_silence_ms < 0:
         msg = f"lead_silence_ms must be >= 0, got {lead_silence_ms}"
@@ -311,6 +329,7 @@ class AudioPlayer:
             raise self._unhandled_errors.get()
 
     def _open_stream(self) -> AudioOutputStream:
+        _refresh_audio_devices()
         stream = cast(AudioOutputStream, sd.OutputStream(samplerate=self._sample_rate, channels=1, dtype="float32"))
         stream.start()
         _write_lead_silence(stream, self._sample_rate, self._lead_silence_ms)
@@ -324,10 +343,14 @@ class AudioPlayer:
         finally:
             stream.close()
 
+    def _ensure_stream(self, stream: AudioOutputStream | None) -> AudioOutputStream:
+        if stream is not None:
+            return stream
+        return self._open_stream()
+
     def _handle_job(self, stream: AudioOutputStream | None, job: PlaybackJob) -> AudioOutputStream | None:
         try:
-            if stream is None:
-                stream = self._open_stream()
+            stream = self._ensure_stream(stream)
             for chunk in job.chunks:
                 stream.write(chunk.reshape(-1, 1))
             if job.output_path is not None:

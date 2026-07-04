@@ -341,6 +341,38 @@ class TestAudioPlayer:
         with pytest.raises(RuntimeError, match="device lost"):
             player.close()
 
+    @patch("src.tts.sd")
+    def test_refreshes_audio_devices_before_opening_stream(self, mock_sd: MagicMock) -> None:
+        mock_sd.OutputStream.return_value = MagicMock()
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
+
+        player.submit(PlaybackJob(chunks=[np.ones(3, dtype=np.float32)], output_path=None))
+        player.close()
+
+        assert mock_sd._terminate.call_count == 1
+        assert mock_sd._initialize.call_count == 1
+        names = [call[0] for call in mock_sd.mock_calls]
+        assert names.index("_terminate") < names.index("_initialize") < names.index("OutputStream")
+
+    @patch("src.tts.sd")
+    def test_refreshes_audio_devices_again_when_reopening_after_error(self, mock_sd: MagicMock) -> None:
+        first_stream = MagicMock()
+        second_stream = MagicMock()
+        first_stream.write.side_effect = [None, RuntimeError("device lost")]
+        mock_sd.OutputStream.side_effect = [first_stream, second_stream]
+
+        errors: list[Exception] = []
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
+
+        player.submit(PlaybackJob(chunks=[np.ones(3, dtype=np.float32)], output_path=None, on_error=errors.append))
+        player.submit(PlaybackJob(chunks=[np.ones(4, dtype=np.float32)], output_path=None))
+        player.close()
+
+        assert mock_sd.OutputStream.call_count == 2
+        assert mock_sd._terminate.call_count == 2
+        assert mock_sd._initialize.call_count == 2
+        assert len(errors) == 1
+
 
 class TestAudioWorker:
     """Tests for the audio_worker function."""
