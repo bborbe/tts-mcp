@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Open a fresh output stream per utterance (re-enumerating devices on each open) so playback always follows the current default output device. Replaces the warm-stream optimization, whose cold-start clip is already absorbed by `lead_silence_ms`.
+- Keep one output stream warm across utterances and re-initialize PortAudio only when the default output device actually changes, detected by reading `kAudioHardwarePropertyDefaultOutputDevice` from the CoreAudio HAL via ctypes (a live signal that does not require tearing PortAudio down). This replaces the previous per-utterance `sd._terminate()/_initialize()`, which degraded the CoreAudio HAL over time and produced distorted playback after the server had been running a while, while still following a live switch between two connected devices without a restart.
 - Raised default `lead_silence_ms` from 200 to 400 to absorb Bluetooth link-up latency on the first utterance after a stream open.
 
 ### Fixed

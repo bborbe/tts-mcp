@@ -304,32 +304,49 @@ class TestPlayChunks:
 
 
 class TestAudioPlayer:
-    """Tests for the per-utterance AudioPlayer."""
+    """Tests for the warm-stream AudioPlayer."""
+
+    @pytest.fixture(autouse=True)
+    def _stable_default_device(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Default output device never changes unless a test overrides this.
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: 1)
 
     @patch("src.tts.sd")
-    def test_opens_fresh_stream_and_writes_lead_silence_per_job(self, mock_sd: MagicMock) -> None:
-        first_stream = MagicMock()
-        second_stream = MagicMock()
-        mock_sd.OutputStream.side_effect = [first_stream, second_stream]
+    def test_reuses_warm_stream_across_jobs(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
         player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
 
         player.submit(PlaybackJob(chunks=[np.ones(3, dtype=np.float32)], output_path=None))
         player.submit(PlaybackJob(chunks=[np.ones(4, dtype=np.float32)], output_path=None))
         player.close()
 
-        # A fresh stream is opened per job so playback follows the current default output device.
-        assert mock_sd.OutputStream.call_count == 2
-        assert first_stream.start.call_count == 1
-        assert second_stream.start.call_count == 1
-        # Each open writes lead silence, then the job's single chunk.
-        assert first_stream.write.call_count == 2
-        assert second_stream.write.call_count == 2
-        silence = first_stream.write.call_args_list[0].args[0]
+        # One warm stream is reused across both jobs while the default device is unchanged.
+        mock_sd.OutputStream.assert_called_once_with(samplerate=1000, channels=1, dtype="float32")
+        assert mock_stream.start.call_count == 1
+        # Lead silence written once at open, then one chunk per job = 3 writes total.
+        assert mock_stream.write.call_count == 3
+        silence = mock_stream.write.call_args_list[0].args[0]
         assert silence.shape == (200, 1)
         assert float(np.max(np.abs(silence))) == 0.0
-        # Each job's stream is closed before the next job opens one.
+
+    @patch("src.tts.sd")
+    def test_reopens_when_default_device_changes(self, mock_sd: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        first_stream = MagicMock()
+        second_stream = MagicMock()
+        mock_sd.OutputStream.side_effect = [first_stream, second_stream]
+        # IDs consumed in order: open #1 records 1; pre-job-2 check reads 2 (changed) -> reopen; open #2 records 2.
+        ids = iter([1, 2, 2])
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: next(ids))
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
+
+        player.submit(PlaybackJob(chunks=[np.ones(3, dtype=np.float32)], output_path=None))
+        player.submit(PlaybackJob(chunks=[np.ones(4, dtype=np.float32)], output_path=None))
+        player.close()
+
+        # Device change between jobs forces a reopen on the new device.
+        assert mock_sd.OutputStream.call_count == 2
         assert first_stream.close.call_count == 1
-        assert second_stream.close.call_count == 1
 
     @patch("src.tts.sd")
     def test_reopens_and_rewarms_after_stream_write_error(self, mock_sd: MagicMock) -> None:

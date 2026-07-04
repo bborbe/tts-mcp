@@ -1,5 +1,7 @@
 """Shared TTS engine: config, model/voice discovery, audio generation, playback, and saving."""
 
+import ctypes
+import ctypes.util
 import dataclasses
 import datetime
 import math
@@ -292,6 +294,60 @@ def _refresh_audio_devices() -> None:
     sounddevice_module._initialize()
 
 
+class _AudioObjectPropertyAddress(ctypes.Structure):
+    """CoreAudio AudioObjectPropertyAddress: (selector, scope, element)."""
+
+    _fields_ = (
+        ("mSelector", ctypes.c_uint32),
+        ("mScope", ctypes.c_uint32),
+        ("mElement", ctypes.c_uint32),
+    )
+
+
+def default_output_device_id() -> int | None:
+    """Return the macOS system default output device ID, or None if unavailable.
+
+    Reads kAudioHardwarePropertyDefaultOutputDevice directly from the CoreAudio HAL
+    via ctypes. Unlike sounddevice/PortAudio (which snapshots its device list at
+    initialization), this reflects a live default-device switch immediately and
+    without tearing PortAudio down. Used to detect when the warm output stream must
+    be reopened on a newly-selected device, so PortAudio is re-initialized only on an
+    actual change rather than on every utterance. Returns None off macOS or on any
+    query failure, in which case the caller keeps the current warm stream.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        lib_path = ctypes.util.find_library("CoreAudio")
+        if lib_path is None:
+            return None
+        core_audio = ctypes.CDLL(lib_path)
+    except OSError as exc:
+        print(f"\n  CoreAudio load failed, skipping device-change detection: {exc}", file=sys.stderr)
+        return None
+
+    # FourCC codes: 'dOut' = default output device selector, 'glob' = global scope; element 0 = main.
+    address = _AudioObjectPropertyAddress(0x644F7574, 0x676C6F62, 0)
+    system_object = ctypes.c_uint32(1)  # kAudioObjectSystemObject
+    device_id = ctypes.c_uint32(0)
+    data_size = ctypes.c_uint32(ctypes.sizeof(device_id))
+
+    get_property = core_audio.AudioObjectGetPropertyData
+    get_property.restype = ctypes.c_int32
+    status = get_property(
+        system_object,
+        ctypes.byref(address),
+        ctypes.c_uint32(0),
+        None,
+        ctypes.byref(data_size),
+        ctypes.byref(device_id),
+    )
+    if status != 0:
+        print(f"\n  CoreAudio default-output query returned status {status}", file=sys.stderr)
+        return None
+    return int(device_id.value)
+
+
 def _write_lead_silence(stream: AudioOutputStream, sample_rate: int, lead_silence_ms: int) -> None:
     if lead_silence_ms < 0:
         msg = f"lead_silence_ms must be >= 0, got {lead_silence_ms}"
@@ -315,14 +371,21 @@ class PlaybackJob:
 
 
 class AudioPlayer:
-    """Serial audio player that opens a fresh output stream per utterance.
+    """Serial audio player that keeps one output stream warm across utterances.
 
-    Each job opens a new stream on the current default output device (via
-    _open_stream -> _refresh_audio_devices), plays, and closes it. This makes
-    playback follow the system default even across a switch between two
-    connected devices (no disconnect, so no write error would trigger a
-    warm-stream reopen). _write_lead_silence absorbs the per-open CoreAudio
-    startup clip.
+    A single stream is opened on the current default output device and reused for
+    subsequent utterances, so PortAudio is only re-initialized when the stream is
+    (re)opened — not on every utterance. Re-initializing PortAudio repeatedly
+    (sd._terminate/_initialize) degrades the CoreAudio HAL over time and produces
+    distorted playback, so it is done sparingly.
+
+    Playback still follows a live default-device switch between two *connected*
+    devices (which produces no write error, so nothing would otherwise trigger a
+    reopen): before each utterance the current default device ID is read from the
+    CoreAudio HAL (default_output_device_id); if it changed since the warm stream
+    opened, the stream is closed and reopened on the new device. A device
+    disconnect surfaces as a write error and reopens on the next-but-one utterance.
+    _write_lead_silence absorbs the per-open CoreAudio startup clip.
     """
 
     def __init__(self, sample_rate: int, lead_silence_ms: int) -> None:
@@ -345,6 +408,7 @@ class AudioPlayer:
         self._unhandled_errors: queue.Queue[Exception] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._stream_device_id: int | None = None
 
     def submit(self, job: PlaybackJob) -> None:
         """Queue a playback job for serial playback."""
@@ -374,6 +438,7 @@ class AudioPlayer:
         stream = cast(AudioOutputStream, sd.OutputStream(samplerate=self._sample_rate, channels=1, dtype="float32"))
         stream.start()
         _write_lead_silence(stream, self._sample_rate, self._lead_silence_ms)
+        self._stream_device_id = default_output_device_id()
         return stream
 
     def _close_stream(self, stream: AudioOutputStream | None) -> None:
@@ -384,20 +449,36 @@ class AudioPlayer:
         finally:
             stream.close()
 
-    def _handle_job(self, job: PlaybackJob) -> None:
-        """Open a fresh stream on the current default device, play, then close.
+    def _ensure_stream(self, stream: AudioOutputStream | None) -> AudioOutputStream:
+        if stream is not None:
+            return stream
+        return self._open_stream()
 
-        A fresh stream per utterance is what makes playback follow the system
-        default output device. _open_stream re-enumerates devices via
-        _refresh_audio_devices, so switching the default between two *connected*
-        devices — which produces no write error, so a warm stream would keep
-        playing to the old device — still routes to the new default here.
-        _write_lead_silence absorbs the per-open CoreAudio startup clip, so the
-        warm-stream optimization is not needed to avoid clipping.
+    def _reopen_if_device_changed(self, stream: AudioOutputStream | None) -> AudioOutputStream | None:
+        """Close the warm stream if the default output device changed since it opened.
+
+        Returns None (so the next _ensure_stream reopens on the new device) when a
+        change is detected; otherwise returns the stream unchanged. A None reading
+        (non-macOS or query failure) is treated as "no change" to avoid needless,
+        distortion-inducing PortAudio re-initializations.
         """
-        stream: AudioOutputStream | None = None
+        if stream is None:
+            return None
+        current = default_output_device_id()
+        if current is None or current == self._stream_device_id:
+            return stream
+        self._close_stream(stream)
+        return None
+
+    def _handle_job(self, stream: AudioOutputStream | None, job: PlaybackJob) -> AudioOutputStream | None:
+        """Play one job on the warm stream, reopening first if the default device changed.
+
+        Returns the stream to reuse for the next job, or None if it was closed due
+        to an error (the next job reopens it).
+        """
         try:
-            stream = self._open_stream()
+            stream = self._reopen_if_device_changed(stream)
+            stream = self._ensure_stream(stream)
             for chunk in job.chunks:
                 stream.write(chunk.reshape(-1, 1))
             if job.output_path is not None:
@@ -405,26 +486,40 @@ class AudioPlayer:
                 save_audio(audio, job.output_path, self._sample_rate)
             if job.on_complete is not None:
                 job.on_complete(job.output_path)
+            return stream
         except Exception as exc:
+            close_error: Exception | None = None
+            try:
+                self._close_stream(stream)
+            except Exception as stream_close_error:
+                close_error = stream_close_error
+
+            playback_error = exc
+            if close_error is not None:
+                playback_error = RuntimeError(f"{exc}; additionally failed to close audio stream: {close_error}")
+
             if job.on_error is not None:
-                job.on_error(exc)
+                job.on_error(playback_error)
             else:
-                self._unhandled_errors.put(exc)
+                self._unhandled_errors.put(playback_error)
+            return None
+
+    def _run(self) -> None:
+        stream: AudioOutputStream | None = None
+        try:
+            while True:
+                job = self._jobs.get()
+                try:
+                    if job is None:
+                        break
+                    stream = self._handle_job(stream, job)
+                finally:
+                    self._jobs.task_done()
         finally:
             try:
                 self._close_stream(stream)
-            except Exception as close_error:
-                self._unhandled_errors.put(close_error)
-
-    def _run(self) -> None:
-        while True:
-            job = self._jobs.get()
-            try:
-                if job is None:
-                    break
-                self._handle_job(job)
-            finally:
-                self._jobs.task_done()
+            except Exception as exc:
+                self._unhandled_errors.put(exc)
 
 
 def generate_chunks(model: TTSModel, text: str, voice: str) -> list[np.ndarray]:
