@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Kept audio streams warm between utterances to eliminate cold-start latency.
+- Raised default `lead_silence_ms` from 200 to 400 to absorb Bluetooth link-up latency on the first utterance after a stream open.
 
 ### Fixed
 
 - Fixed CLI playback failure on current MLX by loading models inside worker threads.
 - Fixed server TTS failure by loading the model inside the audio worker thread.
+- Fixed playback failing with CoreAudio error -10851 after switching the default output device: the audio player now re-enumerates PortAudio devices on each stream open, so a long-running server recovers on the next utterance instead of requiring a restart.
 
 ## 2026-06-13
 
