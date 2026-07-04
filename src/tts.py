@@ -289,6 +289,9 @@ def _refresh_audio_devices() -> None:
     (its documented recipe for refreshing the device list), so the module is reached through a
     dynamically-typed reference here.
     """
+    # Logged so an unexpected reopen is visible in the server log: during steady
+    # use this should appear once (server startup) and again only on a device change.
+    print("audio: re-initializing PortAudio for a (re)opened output stream", file=sys.stderr)
     sounddevice_module: Any = sd
     sounddevice_module._terminate()
     sounddevice_module._initialize()
@@ -467,6 +470,10 @@ class AudioPlayer:
         current = default_output_device_id()
         if current is None or current == self._stream_device_id:
             return stream
+        print(
+            f"audio: default output device changed ({self._stream_device_id} -> {current}); reopening stream",
+            file=sys.stderr,
+        )
         self._close_stream(stream)
         return None
 
