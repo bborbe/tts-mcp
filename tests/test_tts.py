@@ -11,10 +11,12 @@ import pytest
 from scipy.signal import resample_poly
 
 from src.tts import (
+    DEFAULT_CONFIG_PATH,
     AudioPlayer,
     PlaybackJob,
     audio_worker,
     clean_text,
+    config_env_var,
     discover_models,
     discover_voices,
     generate_chunks,
@@ -24,6 +26,7 @@ from src.tts import (
     normalize_chunks,
     play_audio,
     play_chunks,
+    resolve_config_path,
     save_audio,
     simplify_punctuation,
 )
@@ -52,7 +55,7 @@ class TestLoadConfig:
     """Tests for the load_config function."""
 
     def test_raises_if_config_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("src.tts.CONFIG_PATH", tmp_path / "nonexistent.yaml")
+        monkeypatch.setenv(config_env_var(), str(tmp_path / "nonexistent.yaml"))
         try:
             load_config()
             raise AssertionError("Expected FileNotFoundError")
@@ -62,10 +65,37 @@ class TestLoadConfig:
     def test_loads_valid_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_file = tmp_path / "config.yaml"
         config_file.write_text("models_dir: /some/path\n")
-        monkeypatch.setattr("src.tts.CONFIG_PATH", config_file)
+        monkeypatch.setenv(config_env_var(), str(config_file))
 
         config = load_config()
         assert config["models_dir"] == "/some/path"
+
+
+class TestResolveConfigPath:
+    """Tests for config file location resolution."""
+
+    def test_env_override_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        override = tmp_path / "custom.yaml"
+        monkeypatch.setenv(config_env_var(), str(override))
+        # XDG dir also has a file, but the explicit override must win.
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        (tmp_path / "xdg" / "tts-mcp").mkdir(parents=True)
+        (tmp_path / "xdg" / "tts-mcp" / "config.yaml").write_text("x: 1\n")
+        assert resolve_config_path() == override
+
+    def test_xdg_used_when_present_and_no_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(config_env_var(), raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        xdg_cfg = tmp_path / "xdg" / "tts-mcp" / "config.yaml"
+        xdg_cfg.parent.mkdir(parents=True)
+        xdg_cfg.write_text("x: 1\n")
+        assert resolve_config_path() == xdg_cfg
+
+    def test_falls_back_to_project_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(config_env_var(), raising=False)
+        # Point XDG at an empty dir so no XDG config exists.
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+        assert resolve_config_path() == DEFAULT_CONFIG_PATH
 
 
 class TestDiscoverModels:

@@ -7,7 +7,8 @@
  * fallbacks, no swallowed errors.
  */
 
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
+import { homedir } from "os";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
@@ -18,7 +19,25 @@ import { z } from "zod";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = resolve(__dirname, "..");
-const CONFIG_PATH = resolve(PROJECT_ROOT, "config.yaml");
+
+// Config file resolution, matching src/tts.py resolve_config_path(). Precedence:
+//   1. $TTS_MCP_CONFIG (explicit override)
+//   2. $XDG_CONFIG_HOME/tts-mcp/config.yaml (defaults to ~/.config/tts-mcp/config.yaml)
+//   3. <project root>/config.yaml (back-compat)
+function resolveConfigPath(): string {
+  const override = process.env.TTS_MCP_CONFIG;
+  if (override) {
+    return override;
+  }
+  const xdgHome = process.env.XDG_CONFIG_HOME || resolve(homedir(), ".config");
+  const xdgPath = resolve(xdgHome, "tts-mcp", "config.yaml");
+  if (existsSync(xdgPath)) {
+    return xdgPath;
+  }
+  return resolve(PROJECT_ROOT, "config.yaml");
+}
+
+const CONFIG_PATH = resolveConfigPath();
 const HEALTH_TIMEOUT_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 

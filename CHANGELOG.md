@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Config file location is now resolved in precedence order: `$TTS_MCP_CONFIG` → `$XDG_CONFIG_HOME/tts-mcp/config.yaml` (defaults to `~/.config/tts-mcp/config.yaml`) → `./config.yaml` (project-root fallback). Both the Python server/CLI and the TypeScript MCP relay honor the same order, so machine-local config can live outside the repo. `model:`/`models_dir:`/data paths stay relative to the working directory, not the config file.
+
 ### Changed
 
 - Open a fresh output stream per utterance (re-enumerating devices on each open) so playback always follows the current default output device. Replaces the warm-stream optimization, whose cold-start clip is already absorbed by `lead_silence_ms`.

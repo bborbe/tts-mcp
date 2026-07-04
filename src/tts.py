@@ -3,6 +3,7 @@
 import dataclasses
 import datetime
 import math
+import os
 import queue
 import re
 import sys
@@ -20,7 +21,38 @@ from mlx_audio.tts.utils import load
 from scipy.signal import resample_poly
 
 OUTPUT_DIR = Path("data/output")
-CONFIG_PATH = Path("config.yaml")
+
+# Config file resolution. In precedence order:
+#   1. $TTS_MCP_CONFIG (explicit override)
+#   2. $XDG_CONFIG_HOME/tts-mcp/config.yaml (defaults to ~/.config/tts-mcp/config.yaml)
+#   3. ./config.yaml in the current working directory (project-root fallback / back-compat)
+# Data and model paths inside the config remain relative to the process working
+# directory, not to the config file, so moving the config out of the repo does
+# not change how `model:` / `models_dir:` resolve.
+DEFAULT_CONFIG_PATH = Path("config.yaml")
+
+
+def config_env_var() -> str:
+    """Name of the environment variable that overrides the config file location."""
+    return "TTS_MCP_CONFIG"
+
+
+def xdg_config_path() -> Path:
+    """Path to config.yaml under XDG config home (~/.config/tts-mcp/config.yaml by default)."""
+    xdg_home = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg_home) if xdg_home else Path.home() / ".config"
+    return base / "tts-mcp" / "config.yaml"
+
+
+def resolve_config_path() -> Path:
+    """Resolve the config file location following the documented precedence order."""
+    override = os.environ.get(config_env_var())
+    if override:
+        return Path(override)
+    xdg_path = xdg_config_path()
+    if xdg_path.exists():
+        return xdg_path
+    return DEFAULT_CONFIG_PATH
 
 
 class GenerationResult(Protocol):
@@ -108,20 +140,21 @@ def simplify_punctuation(text: str) -> str:
 
 
 def load_config() -> dict[str, Any]:
-    """Load configuration from config.yaml.
+    """Load configuration from the resolved config path (see resolve_config_path).
 
     Returns:
         Configuration dictionary.
 
     Raises:
-        FileNotFoundError: If config.yaml does not exist.
-        ValueError: If config.yaml is empty or invalid.
+        FileNotFoundError: If the resolved config file does not exist.
+        ValueError: If the config file is empty or invalid.
     """
-    if not CONFIG_PATH.exists():
-        msg = f"Configuration file not found: {CONFIG_PATH}"
+    config_path = resolve_config_path()
+    if not config_path.exists():
+        msg = f"Configuration file not found: {config_path}"
         raise FileNotFoundError(msg)
 
-    with CONFIG_PATH.open() as f:
+    with config_path.open() as f:
         raw = yaml.safe_load(f)
 
     if not isinstance(raw, dict):

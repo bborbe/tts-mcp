@@ -141,7 +141,13 @@ After downloading, update `config.yaml` with the model path.
 
 ## Configuration
 
-All configuration lives in `config.yaml` at the project root. The file is gitignored and must be created manually. Example:
+Configuration lives in a `config.yaml` file, resolved in this precedence order:
+
+1. `$TTS_MCP_CONFIG` — explicit path override
+2. `$XDG_CONFIG_HOME/tts-mcp/config.yaml` — defaults to `~/.config/tts-mcp/config.yaml`
+3. `./config.yaml` — project root (fallback)
+
+Keeping machine-local config at `~/.config/tts-mcp/config.yaml` keeps it out of the repo working tree. Both the Python server/CLI and the TypeScript MCP relay use the same order. Note: `model:`, `models_dir:`, and data paths inside the file are resolved relative to the **process working directory**, not the config file's location. Example: 
 
 ```yaml
 model: /path/to/Voxtral-4B-TTS-2603-mlx-6bit
