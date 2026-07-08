@@ -351,51 +351,56 @@ def default_output_device_id() -> int | None:
     return int(device_id.value)
 
 
+def restart_process_on_device_change(_new_device: int) -> None:
+    """Default watcher handler: exit so launchd (KeepAlive) respawns a fresh process.
+
+    Restarting yields a clean CoreAudio HAL bound to the new default output device,
+    avoiding the in-process PortAudio re-init that degrades the HAL (see ``AudioPlayer``).
+    """
+    os._exit(0)
+
+
 def start_output_device_change_watcher(
-    poll_interval_s: float = 2.0,
-    get_device: Callable[[], int | None] = default_output_device_id,
-    on_change: Callable[[int], None] | None = None,
-    stop_event: threading.Event | None = None,
+    poll_interval_s: float,
+    get_device: Callable[[], int | None],
+    on_change: Callable[[int], None],
+    stop_event: threading.Event,
 ) -> threading.Thread:
     """Restart the process when the macOS default output device changes.
 
     An in-process PortAudio re-init (``sd._terminate``/``_initialize``) after a
     live device switch degrades the CoreAudio HAL and distorts playback (see
     ``AudioPlayer``). Instead, this background daemon thread polls the HAL for the
-    default output device and, on a change from the boot device, exits the process
-    so launchd (``KeepAlive``) respawns a fresh one with a clean HAL bound to the
-    new device. Trade-off: the fresh process reloads the TTS model (~15-20s of no
-    voice), acceptable for infrequent plug/unplug switches.
+    default output device and, on a change from the boot device, calls ``on_change``
+    (in production ``restart_process_on_device_change``, which exits so launchd
+    ``KeepAlive`` respawns a fresh process with a clean HAL bound to the new device).
+    Trade-off: the fresh process reloads the TTS model (~15-20s of no voice),
+    acceptable for infrequent plug/unplug switches.
+
+    The poll compares against the boot device only, so transient/aggregate device
+    ids the HAL reports mid-playback (which flip back within milliseconds) do not
+    trigger a restart; only a sustained switch does.
 
     Args:
         poll_interval_s: Seconds between HAL polls.
         get_device: Returns the current default output device id (injectable for tests).
-        on_change: Called with the new device id on a change. Defaults to
-            ``os._exit(0)``; injectable so tests observe the trigger without
-            killing the test process.
+        on_change: Called with the new device id on a sustained change.
         stop_event: When set, the watch loop returns (used by tests).
 
     Returns:
         The started daemon thread.
     """
 
-    def _default_on_change(_new_device: int) -> None:
-        os._exit(0)
-
-    handler = on_change if on_change is not None else _default_on_change
-    stop = stop_event if stop_event is not None else threading.Event()
-
     def _run() -> None:
         boot_device = get_device()
-        while not stop.wait(poll_interval_s):
+        while not stop_event.wait(poll_interval_s):
             current = get_device()
             if current is not None and boot_device is not None and current != boot_device:
                 print(
-                    f"audio: default output device changed ({boot_device} -> {current}); "
-                    "restarting process for a clean CoreAudio HAL",
+                    f"audio: default output device changed ({boot_device} -> {current}); restarting process for a clean CoreAudio HAL",
                     file=sys.stderr,
                 )
-                handler(current)
+                on_change(current)
                 return
 
     thread = threading.Thread(target=_run, name="device-change-watcher", daemon=True)
@@ -463,7 +468,6 @@ class AudioPlayer:
         self._unhandled_errors: queue.Queue[Exception] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._closed = False
-        self._stream_device_id: int | None = None
 
     def submit(self, job: PlaybackJob) -> None:
         """Queue a playback job for serial playback."""
@@ -493,7 +497,6 @@ class AudioPlayer:
         stream = cast(AudioOutputStream, sd.OutputStream(samplerate=self._sample_rate, channels=1, dtype="float32"))
         stream.start()
         _write_lead_silence(stream, self._sample_rate, self._lead_silence_ms)
-        self._stream_device_id = default_output_device_id()
         return stream
 
     def _close_stream(self, stream: AudioOutputStream | None) -> None:
@@ -509,34 +512,21 @@ class AudioPlayer:
             return stream
         return self._open_stream()
 
-    def _reopen_if_device_changed(self, stream: AudioOutputStream | None) -> AudioOutputStream | None:
-        """Close the warm stream if the default output device changed since it opened.
-
-        Returns None (so the next _ensure_stream reopens on the new device) when a
-        change is detected; otherwise returns the stream unchanged. A None reading
-        (non-macOS or query failure) is treated as "no change" to avoid needless,
-        distortion-inducing PortAudio re-initializations.
-        """
-        if stream is None:
-            return None
-        current = default_output_device_id()
-        if current is None or current == self._stream_device_id:
-            return stream
-        print(
-            f"audio: default output device changed ({self._stream_device_id} -> {current}); reopening stream",
-            file=sys.stderr,
-        )
-        self._close_stream(stream)
-        return None
-
     def _handle_job(self, stream: AudioOutputStream | None, job: PlaybackJob) -> AudioOutputStream | None:
-        """Play one job on the warm stream, reopening first if the default device changed.
+        """Play one job on the warm stream.
+
+        The stream is kept warm across jobs; the default output device is NOT
+        re-queried per utterance. Live default-device switches are handled by
+        ``start_output_device_change_watcher``, which restarts the whole process
+        for a clean CoreAudio HAL rather than re-initializing PortAudio in place
+        (repeated in-process re-init degrades the HAL and distorts playback, and
+        the HAL query returns transient/aggregate device ids mid-playback that
+        would otherwise trigger spurious per-utterance reopens).
 
         Returns the stream to reuse for the next job, or None if it was closed due
         to an error (the next job reopens it).
         """
         try:
-            stream = self._reopen_if_device_changed(stream)
             stream = self._ensure_stream(stream)
             for chunk in job.chunks:
                 stream.write(chunk.reshape(-1, 1))
