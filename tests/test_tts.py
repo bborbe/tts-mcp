@@ -332,22 +332,26 @@ class TestAudioPlayer:
         assert float(np.max(np.abs(silence))) == 0.0
 
     @patch("src.tts.sd")
-    def test_reopens_when_default_device_changes(self, mock_sd: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
-        first_stream = MagicMock()
-        second_stream = MagicMock()
-        mock_sd.OutputStream.side_effect = [first_stream, second_stream]
-        # IDs consumed in order: open #1 records 1; pre-job-2 check reads 2 (changed) -> reopen; open #2 records 2.
-        ids = iter([1, 2, 2])
-        monkeypatch.setattr("src.tts.default_output_device_id", lambda: next(ids))
+    def test_keeps_warm_stream_across_transient_device_id_blips(self, mock_sd: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The HAL can report transient/aggregate device ids mid-playback; the warm
+        # stream must NOT reopen on them. Device switches are handled out-of-band by
+        # the process-restart watcher, not by per-utterance reopen.
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        ids = iter([1, 99, 2, 1])  # bouncing values that must be ignored by playback
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: next(ids, 1))
         player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
 
         player.submit(PlaybackJob(chunks=[np.ones(3, dtype=np.float32)], output_path=None))
         player.submit(PlaybackJob(chunks=[np.ones(4, dtype=np.float32)], output_path=None))
         player.close()
 
-        # Device change between jobs forces a reopen on the new device.
-        assert mock_sd.OutputStream.call_count == 2
-        assert first_stream.close.call_count == 1
+        # One warm stream, opened and started once, reused across both jobs despite
+        # bouncing device ids — no per-utterance reopen. (The single close is normal
+        # player-shutdown teardown, not a device-change reopen.)
+        mock_sd.OutputStream.assert_called_once_with(samplerate=1000, channels=1, dtype="float32")
+        assert mock_stream.start.call_count == 1
+        assert mock_stream.close.call_count == 1
 
     @patch("src.tts.sd")
     def test_reopens_and_rewarms_after_stream_write_error(self, mock_sd: MagicMock) -> None:

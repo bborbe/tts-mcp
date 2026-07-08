@@ -25,11 +25,13 @@ from src.tts import (
     PlaybackJob,
     TTSModel,
     clean_text,
+    default_output_device_id,
     discover_voices,
     generate_chunks,
     load_config,
     make_output_path,
     normalize_chunks,
+    restart_process_on_device_change,
     simplify_punctuation,
     start_output_device_change_watcher,
 )
@@ -561,7 +563,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # Restart the process on a default-output-device switch rather than doing an
     # in-process PortAudio re-init (which degrades the CoreAudio HAL — see AudioPlayer).
-    start_output_device_change_watcher()
+    start_output_device_change_watcher(
+        poll_interval_s=2.0,
+        get_device=default_output_device_id,
+        on_change=restart_process_on_device_change,
+        stop_event=threading.Event(),
+    )
 
     yield
 
