@@ -29,6 +29,7 @@ from src.tts import (
     resolve_config_path,
     save_audio,
     simplify_punctuation,
+    start_output_device_change_watcher,
 )
 
 _SR = 24000
@@ -742,3 +743,48 @@ class TestNormalizeChunks:
 
         for c in result:
             assert c.dtype == np.float32
+
+
+def test_output_device_change_watcher_fires_on_change() -> None:
+    """A default-output-device change calls on_change with the new device id."""
+    devices = [1, 1, 2]
+    idx = {"i": 0}
+
+    def fake_get_device() -> int | None:
+        i = idx["i"]
+        idx["i"] = min(i + 1, len(devices) - 1)
+        return devices[i]
+
+    fired = threading.Event()
+    seen: dict[str, int] = {}
+
+    def on_change(new_device: int) -> None:
+        seen["device"] = new_device
+        fired.set()
+
+    stop = threading.Event()
+    thread = start_output_device_change_watcher(
+        poll_interval_s=0.01,
+        get_device=fake_get_device,
+        on_change=on_change,
+        stop_event=stop,
+    )
+    assert fired.wait(2.0), "watcher did not fire on device change"
+    assert seen["device"] == 2
+    stop.set()
+    thread.join(timeout=1.0)
+
+
+def test_output_device_change_watcher_stable_no_fire() -> None:
+    """A stable default device never triggers on_change."""
+    fired = threading.Event()
+    stop = threading.Event()
+    thread = start_output_device_change_watcher(
+        poll_interval_s=0.01,
+        get_device=lambda: 7,
+        on_change=lambda _dev: fired.set(),
+        stop_event=stop,
+    )
+    assert not fired.wait(0.1)
+    stop.set()
+    thread.join(timeout=1.0)

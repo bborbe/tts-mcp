@@ -351,6 +351,58 @@ def default_output_device_id() -> int | None:
     return int(device_id.value)
 
 
+def start_output_device_change_watcher(
+    poll_interval_s: float = 2.0,
+    get_device: Callable[[], int | None] = default_output_device_id,
+    on_change: Callable[[int], None] | None = None,
+    stop_event: threading.Event | None = None,
+) -> threading.Thread:
+    """Restart the process when the macOS default output device changes.
+
+    An in-process PortAudio re-init (``sd._terminate``/``_initialize``) after a
+    live device switch degrades the CoreAudio HAL and distorts playback (see
+    ``AudioPlayer``). Instead, this background daemon thread polls the HAL for the
+    default output device and, on a change from the boot device, exits the process
+    so launchd (``KeepAlive``) respawns a fresh one with a clean HAL bound to the
+    new device. Trade-off: the fresh process reloads the TTS model (~15-20s of no
+    voice), acceptable for infrequent plug/unplug switches.
+
+    Args:
+        poll_interval_s: Seconds between HAL polls.
+        get_device: Returns the current default output device id (injectable for tests).
+        on_change: Called with the new device id on a change. Defaults to
+            ``os._exit(0)``; injectable so tests observe the trigger without
+            killing the test process.
+        stop_event: When set, the watch loop returns (used by tests).
+
+    Returns:
+        The started daemon thread.
+    """
+
+    def _default_on_change(_new_device: int) -> None:
+        os._exit(0)
+
+    handler = on_change if on_change is not None else _default_on_change
+    stop = stop_event if stop_event is not None else threading.Event()
+
+    def _run() -> None:
+        boot_device = get_device()
+        while not stop.wait(poll_interval_s):
+            current = get_device()
+            if current is not None and boot_device is not None and current != boot_device:
+                print(
+                    f"audio: default output device changed ({boot_device} -> {current}); "
+                    "restarting process for a clean CoreAudio HAL",
+                    file=sys.stderr,
+                )
+                handler(current)
+                return
+
+    thread = threading.Thread(target=_run, name="device-change-watcher", daemon=True)
+    thread.start()
+    return thread
+
+
 def _write_lead_silence(stream: AudioOutputStream, sample_rate: int, lead_silence_ms: int) -> None:
     if lead_silence_ms < 0:
         msg = f"lead_silence_ms must be >= 0, got {lead_silence_ms}"

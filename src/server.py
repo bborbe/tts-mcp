@@ -31,6 +31,7 @@ from src.tts import (
     make_output_path,
     normalize_chunks,
     simplify_punctuation,
+    start_output_device_change_watcher,
 )
 
 logger = logging.getLogger("tts-server")
@@ -557,6 +558,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         raise load_error
 
     app.state.server = state
+
+    # Restart the process on a default-output-device switch rather than doing an
+    # in-process PortAudio re-init (which degrades the CoreAudio HAL — see AudioPlayer).
+    start_output_device_change_watcher()
 
     yield
 
