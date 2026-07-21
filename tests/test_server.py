@@ -663,7 +663,7 @@ class TestServerAudioWorker:
             assert error is not None
             assert "Audio device error" in error
 
-    @patch("src.tts.sd")
+    @patch("src.tts.player.sd")
     def test_recovers_after_output_stream_terminates(
         self,
         mock_sd: MagicMock,
