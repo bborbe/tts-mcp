@@ -328,4 +328,4 @@ See [CHANGELOG.md](CHANGELOG.md) for a full list of changes.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is a derivative of [florianbuetow/tts-mcp](https://github.com/florianbuetow/tts-mcp), maintained independently by [bborbe/tts-mcp](https://github.com/bborbe/tts-mcp). Licensed under the MIT License (© 2025 Florian Butow, © 2026 Benjamin Borbe). See [LICENSE](LICENSE) for details.
