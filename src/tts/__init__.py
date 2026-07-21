@@ -40,6 +40,7 @@ from src.tts.text import (
     simplify_punctuation,
 )
 from src.tts.worker import (
+    AudioSettings,
     audio_worker,
     audio_worker_from_model_id,
     streaming_chunk_iter,
@@ -49,6 +50,7 @@ __all__ = [
     "DEFAULT_CONFIG_PATH",
     "OUTPUT_DIR",
     "AudioPlayer",
+    "AudioSettings",
     "PlaybackJob",
     "StreamingPlaybackJob",
     "TTSModel",

@@ -1,5 +1,6 @@
 """Background TTS worker: streaming and buffered generation-and-playback loops."""
 
+import dataclasses
 import queue
 import sys
 import threading
@@ -16,27 +17,51 @@ from src.tts.player import AudioPlayer, PlaybackJob, play_stream
 from src.tts.protocols import TTSModel
 
 
-def _generate_worker_chunks(
-    model: TTSModel,
-    text: str,
-    voice: str,
-    sample_rate: int,
-    normalize_audio: bool,
-    target_lufs: float,
-    true_peak_ceiling_db: float,
-    min_duration_seconds: float,
-    meter: pyln.Meter,
-) -> list[np.ndarray] | None:
+@dataclasses.dataclass(frozen=True)
+class AudioSettings:
+    """Audio generation, normalization, and playback settings for the worker.
+
+    Groups the values that are otherwise threaded through every worker function,
+    so the worker API stays small. Built once by the CLI (from CliConfig) and the
+    server (from ServerState) and passed down unchanged.
+
+    Attributes:
+        sample_rate: Sample rate in Hz.
+        lead_silence_ms: Silence written after each audio stream open/reopen.
+        normalize_audio: Whether to apply boost-only LUFS normalization (both modes).
+        target_lufs: Target integrated loudness in LUFS when normalization is enabled.
+        true_peak_ceiling_db: Maximum true-peak level in dBFS after gain.
+        min_duration_seconds: Minimum utterance length to attempt normalization.
+        meter: Pre-constructed pyloudnorm Meter matching sample_rate.
+        stream: Whether to stream playback within each utterance (low latency).
+        streaming_interval: Approximate seconds of audio per streamed chunk.
+        streaming_warmup_seconds: Seconds buffered to measure the streaming
+            normalization gain (see normalize_stream).
+    """
+
+    sample_rate: int
+    lead_silence_ms: int
+    normalize_audio: bool
+    target_lufs: float
+    true_peak_ceiling_db: float
+    min_duration_seconds: float
+    meter: pyln.Meter
+    stream: bool
+    streaming_interval: float
+    streaming_warmup_seconds: float
+
+
+def _generate_worker_chunks(model: TTSModel, text: str, voice: str, settings: AudioSettings) -> list[np.ndarray] | None:
     try:
         generated = generate_chunks(model, text, voice)
-        if normalize_audio and generated:
+        if settings.normalize_audio and generated:
             generated = normalize_chunks(
                 generated,
-                sample_rate,
-                target_lufs,
-                true_peak_ceiling_db,
-                min_duration_seconds,
-                meter,
+                settings.sample_rate,
+                settings.target_lufs,
+                settings.true_peak_ceiling_db,
+                settings.min_duration_seconds,
+                settings.meter,
             )
         return generated
     except (RuntimeError, ValueError) as exc:
@@ -85,35 +110,24 @@ def _cli_stream_callbacks(
     return on_complete, on_error
 
 
-def streaming_chunk_iter(
-    model: TTSModel,
-    text: str,
-    voice: str,
-    streaming_interval: float,
-    normalize_audio: bool,
-    sample_rate: int,
-    target_lufs: float,
-    true_peak_ceiling_db: float,
-    min_duration_seconds: float,
-    warmup_seconds: float,
-    meter: pyln.Meter,
-) -> Iterator[np.ndarray]:
+def streaming_chunk_iter(model: TTSModel, text: str, voice: str, settings: AudioSettings) -> Iterator[np.ndarray]:
     """Build the chunk iterator for streaming playback, optionally normalized.
 
-    When normalize_audio is set, the raw generation stream is wrapped with
-    normalize_stream (warm-up-window loudness normalization), so streamed audio
-    matches the buffered path's loudness without waiting for the whole utterance.
+    When settings.normalize_audio is set, the raw generation stream is wrapped
+    with normalize_stream (warm-up-window loudness normalization), so streamed
+    audio matches the buffered path's loudness without waiting for the whole
+    utterance.
     """
-    chunks = iter_stream_chunks(model, text, voice, streaming_interval)
-    if normalize_audio:
+    chunks = iter_stream_chunks(model, text, voice, settings.streaming_interval)
+    if settings.normalize_audio:
         chunks = normalize_stream(
             chunks,
-            sample_rate,
-            target_lufs,
-            true_peak_ceiling_db,
-            min_duration_seconds,
-            warmup_seconds,
-            meter,
+            settings.sample_rate,
+            settings.target_lufs,
+            settings.true_peak_ceiling_db,
+            settings.min_duration_seconds,
+            settings.streaming_warmup_seconds,
+            settings.meter,
         )
     return chunks
 
@@ -124,14 +138,7 @@ def _run_streaming_worker(
     voice: str,
     output_path: Path | None,
     player: AudioPlayer,
-    streaming_interval: float,
-    normalize_audio: bool,
-    sample_rate: int,
-    target_lufs: float,
-    true_peak_ceiling_db: float,
-    min_duration_seconds: float,
-    warmup_seconds: float,
-    meter: pyln.Meter,
+    settings: AudioSettings,
 ) -> None:
     """Process the work queue in streaming mode: play each utterance as it generates.
 
@@ -152,19 +159,7 @@ def _run_streaming_worker(
         try:
             play_stream(
                 player,
-                streaming_chunk_iter(
-                    model,
-                    text,
-                    voice,
-                    streaming_interval,
-                    normalize_audio,
-                    sample_rate,
-                    target_lufs,
-                    true_peak_ceiling_db,
-                    min_duration_seconds,
-                    warmup_seconds,
-                    meter,
-                ),
+                streaming_chunk_iter(model, text, voice, settings),
                 output_path,
                 on_complete,
                 on_error,
@@ -183,12 +178,7 @@ def _run_buffered_worker(
     voice: str,
     output_path: Path | None,
     player: AudioPlayer,
-    sample_rate: int,
-    normalize_audio: bool,
-    target_lufs: float,
-    true_peak_ceiling_db: float,
-    min_duration_seconds: float,
-    meter: pyln.Meter,
+    settings: AudioSettings,
 ) -> None:
     """Process the work queue in buffered mode with cross-utterance lookahead.
 
@@ -212,17 +202,7 @@ def _run_buffered_worker(
                 playback_done.wait()
             break
 
-        generated = _generate_worker_chunks(
-            model,
-            text,
-            voice,
-            sample_rate,
-            normalize_audio,
-            target_lufs,
-            true_peak_ceiling_db,
-            min_duration_seconds,
-            meter,
-        )
+        generated = _generate_worker_chunks(model, text, voice, settings)
         if generated is not None:
             pending_chunks = generated
         work_queue.task_done()
@@ -239,73 +219,29 @@ def audio_worker(
     model: TTSModel,
     voice: str,
     output_path: Path | None,
-    sample_rate: int,
-    lead_silence_ms: int,
-    normalize_audio: bool,
-    target_lufs: float,
-    true_peak_ceiling_db: float,
-    min_duration_seconds: float,
-    meter: pyln.Meter,
-    stream: bool,
-    streaming_interval: float,
-    streaming_warmup_seconds: float,
+    settings: AudioSettings,
 ) -> None:
     """Background worker that generates and plays TTS audio.
 
-    In streaming mode (stream=True) each utterance is played chunk-by-chunk as it
-    generates, for low latency. In buffered mode it generates the full utterance
-    (with loudness normalization) before playback, generating the next message
-    while the current one plays so there is no gap between sentences.
+    In streaming mode (settings.stream=True) each utterance is played
+    chunk-by-chunk as it generates, for low latency. In buffered mode it generates
+    the full utterance (with loudness normalization) before playback, generating
+    the next message while the current one plays so there is no gap between
+    sentences.
 
     Args:
         work_queue: Queue of text strings to synthesize. None signals shutdown.
         model: Loaded TTS model.
         voice: Voice to use for synthesis.
         output_path: Path to save generated audio, or None to skip saving.
-        sample_rate: Sample rate in Hz.
-        lead_silence_ms: Silence written after each audio stream open/reopen.
-        normalize_audio: Whether to apply boost-only LUFS normalization (both modes).
-        target_lufs: Target integrated loudness in LUFS when normalization is enabled.
-        true_peak_ceiling_db: Maximum true-peak level in dBFS after gain.
-        min_duration_seconds: Minimum utterance length to attempt normalization.
-        meter: Pre-constructed pyloudnorm Meter matching sample_rate.
-        stream: Whether to stream playback within each utterance (low latency).
-        streaming_interval: Approximate seconds of audio per streamed chunk.
-        streaming_warmup_seconds: Seconds buffered to measure the streaming
-            normalization gain (see normalize_stream).
+        settings: Audio generation, normalization, and playback settings.
     """
-    player = AudioPlayer(sample_rate, lead_silence_ms)
+    player = AudioPlayer(settings.sample_rate, settings.lead_silence_ms)
     try:
-        if stream:
-            _run_streaming_worker(
-                work_queue,
-                model,
-                voice,
-                output_path,
-                player,
-                streaming_interval,
-                normalize_audio,
-                sample_rate,
-                target_lufs,
-                true_peak_ceiling_db,
-                min_duration_seconds,
-                streaming_warmup_seconds,
-                meter,
-            )
+        if settings.stream:
+            _run_streaming_worker(work_queue, model, voice, output_path, player, settings)
         else:
-            _run_buffered_worker(
-                work_queue,
-                model,
-                voice,
-                output_path,
-                player,
-                sample_rate,
-                normalize_audio,
-                target_lufs,
-                true_peak_ceiling_db,
-                min_duration_seconds,
-                meter,
-            )
+            _run_buffered_worker(work_queue, model, voice, output_path, player, settings)
     finally:
         player.close()
 
@@ -315,16 +251,7 @@ def audio_worker_from_model_id(
     model_id: str,
     voice: str,
     output_path: Path | None,
-    sample_rate: int,
-    lead_silence_ms: int,
-    normalize_audio: bool,
-    target_lufs: float,
-    true_peak_ceiling_db: float,
-    min_duration_seconds: float,
-    meter: pyln.Meter,
-    stream: bool,
-    streaming_interval: float,
-    streaming_warmup_seconds: float,
+    settings: AudioSettings,
     ready_queue: queue.Queue[BaseException | None] | None,
 ) -> None:
     """Load the model in the worker thread, then process queued TTS work.
@@ -346,19 +273,4 @@ def audio_worker_from_model_id(
     if ready_queue is not None:
         ready_queue.put(None)
 
-    audio_worker(
-        work_queue,
-        model,
-        voice,
-        output_path,
-        sample_rate,
-        lead_silence_ms,
-        normalize_audio,
-        target_lufs,
-        true_peak_ceiling_db,
-        min_duration_seconds,
-        meter,
-        stream,
-        streaming_interval,
-        streaming_warmup_seconds,
-    )
+    audio_worker(work_queue, model, voice, output_path, settings)

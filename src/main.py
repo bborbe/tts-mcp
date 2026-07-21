@@ -15,6 +15,7 @@ import pyloudnorm as pyln
 
 from src.tts import (
     OUTPUT_DIR,
+    AudioSettings,
     audio_worker_from_model_id,
     clean_text,
     discover_models,
@@ -333,25 +334,22 @@ def main() -> None:
 
     meter = pyln.Meter(float(cfg.sample_rate))
 
+    settings = AudioSettings(
+        sample_rate=cfg.sample_rate,
+        lead_silence_ms=cfg.lead_silence_ms,
+        normalize_audio=cfg.normalization.enabled,
+        target_lufs=cfg.normalization.target_lufs,
+        true_peak_ceiling_db=cfg.normalization.true_peak_ceiling_db,
+        min_duration_seconds=cfg.normalization.min_duration_seconds,
+        meter=meter,
+        stream=cfg.stream,
+        streaming_interval=cfg.streaming_interval,
+        streaming_warmup_seconds=cfg.streaming_warmup_seconds,
+    )
+
     worker = threading.Thread(
         target=audio_worker_from_model_id,
-        args=(
-            work_queue,
-            model_dir,
-            voice,
-            output_path,
-            cfg.sample_rate,
-            cfg.lead_silence_ms,
-            cfg.normalization.enabled,
-            cfg.normalization.target_lufs,
-            cfg.normalization.true_peak_ceiling_db,
-            cfg.normalization.min_duration_seconds,
-            meter,
-            cfg.stream,
-            cfg.streaming_interval,
-            cfg.streaming_warmup_seconds,
-            ready_queue,
-        ),
+        args=(work_queue, model_dir, voice, output_path, settings, ready_queue),
         daemon=True,
     )
     worker.start()

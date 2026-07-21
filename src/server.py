@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from src.tts import (
     OUTPUT_DIR,
     AudioPlayer,
+    AudioSettings,
     PlaybackJob,
     TTSModel,
     clean_text,
@@ -132,6 +133,21 @@ class ServerState:
         self.status_lock = threading.Lock()
         self._counter = 0
         self._counter_lock = threading.Lock()
+
+    def audio_settings(self) -> AudioSettings:
+        """Build the worker AudioSettings from this state's fields."""
+        return AudioSettings(
+            sample_rate=self.sample_rate,
+            lead_silence_ms=self.lead_silence_ms,
+            normalize_audio=self.normalize_audio,
+            target_lufs=self.target_lufs,
+            true_peak_ceiling_db=self.true_peak_ceiling_db,
+            min_duration_seconds=self.min_duration_seconds,
+            meter=self.meter,
+            stream=self.stream,
+            streaming_interval=self.streaming_interval,
+            streaming_warmup_seconds=self.streaming_warmup_seconds,
+        )
 
     def next_message_id(self) -> str:
         """Generate a unique message ID.
@@ -429,6 +445,7 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
     serially; each iteration is wrapped so an unexpected error is logged and the
     worker keeps running.
     """
+    settings = state.audio_settings()
     while True:
         current_item: WorkItem | None = None
         try:
@@ -447,19 +464,7 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
             try:
                 play_stream(
                     player,
-                    streaming_chunk_iter(
-                        model,
-                        item.text,
-                        item.voice,
-                        state.streaming_interval,
-                        state.normalize_audio,
-                        state.sample_rate,
-                        state.target_lufs,
-                        state.true_peak_ceiling_db,
-                        state.min_duration_seconds,
-                        state.streaming_warmup_seconds,
-                        state.meter,
-                    ),
+                    streaming_chunk_iter(model, item.text, item.voice, settings),
                     output_path,
                     on_complete,
                     on_error,

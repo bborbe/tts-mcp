@@ -14,6 +14,7 @@ from scipy.signal import resample_poly
 from src.tts import (
     DEFAULT_CONFIG_PATH,
     AudioPlayer,
+    AudioSettings,
     PlaybackJob,
     StreamingPlaybackJob,
     audio_worker,
@@ -52,14 +53,30 @@ def _drain(q: "queue.Queue[np.ndarray | None]") -> list[np.ndarray | None]:
             return items
 
 
+def _audio_settings(*, stream: bool = False, normalize_audio: bool = False) -> AudioSettings:
+    """Build AudioSettings for worker tests (defaults: buffered, normalization off)."""
+    return AudioSettings(
+        sample_rate=_SR,
+        lead_silence_ms=200,
+        normalize_audio=normalize_audio,
+        target_lufs=-20.0,
+        true_peak_ceiling_db=-1.0,
+        min_duration_seconds=0.5,
+        meter=_TEST_METER,
+        stream=stream,
+        streaming_interval=1.0,
+        streaming_warmup_seconds=2.0,
+    )
+
+
 def _worker_args(
     work_queue: queue.Queue[str | None],
     model: MagicMock,
     voice: str,
     output_path: Path | None,
-) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, int, bool, float, float, float, pyln.Meter, bool, float, float]:
+) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, AudioSettings]:
     """Build the positional args tuple for audio_worker (buffered mode, normalization disabled)."""
-    return (work_queue, model, voice, output_path, _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER, False, 1.0, 2.0)
+    return (work_queue, model, voice, output_path, _audio_settings())
 
 
 def _make_sine(duration_s: float, freq_hz: float, amplitude: float, sample_rate: int = _SR) -> np.ndarray:
@@ -744,23 +761,7 @@ class TestAudioWorker:
         work_queue.put("hello world")
         work_queue.put(None)
 
-        # audio_worker args: ..., meter, stream=True, streaming_interval, streaming_warmup_seconds
-        args = (
-            work_queue,
-            mock_model,
-            "casual_female",
-            tmp_path / "out.wav",
-            _SR,
-            200,
-            False,
-            -20.0,
-            -1.0,
-            0.5,
-            _TEST_METER,
-            True,
-            1.0,
-            2.0,
-        )
+        args = (work_queue, mock_model, "casual_female", tmp_path / "out.wav", _audio_settings(stream=True))
         t = threading.Thread(target=audio_worker, args=args)
         t.start()
         t.join(timeout=5)
