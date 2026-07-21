@@ -17,6 +17,7 @@ from src.tts import (
     PlaybackJob,
     StreamingPlaybackJob,
     audio_worker,
+    boost_gain,
     clean_text,
     config_env_var,
     discover_models,
@@ -27,6 +28,7 @@ from src.tts import (
     load_config,
     make_output_path,
     normalize_chunks,
+    normalize_stream,
     play_audio,
     play_chunks,
     play_stream,
@@ -55,9 +57,9 @@ def _worker_args(
     model: MagicMock,
     voice: str,
     output_path: Path | None,
-) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, int, bool, float, float, float, pyln.Meter, bool, float]:
+) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, int, bool, float, float, float, pyln.Meter, bool, float, float]:
     """Build the positional args tuple for audio_worker (buffered mode, normalization disabled)."""
-    return (work_queue, model, voice, output_path, _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER, False, 1.0)
+    return (work_queue, model, voice, output_path, _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER, False, 1.0, 2.0)
 
 
 def _make_sine(duration_s: float, freq_hz: float, amplitude: float, sample_rate: int = _SR) -> np.ndarray:
@@ -310,6 +312,92 @@ class TestIterStreamChunks:
 
         assert len(result) == 1
         assert len(result[0]) == 100
+
+
+class TestBoostGain:
+    """Tests for the boost_gain helper."""
+
+    def test_returns_one_for_short_audio(self) -> None:
+        audio = _make_sine(0.1, 220.0, 0.1)  # shorter than min_duration 0.4s
+        assert boost_gain(audio, _SR, -14.0, -1.0, 0.4, _TEST_METER) == 1.0
+
+    def test_returns_one_for_silence(self) -> None:
+        audio = np.zeros(_SR, dtype=np.float32)
+        assert boost_gain(audio, _SR, -14.0, -1.0, 0.4, _TEST_METER) == 1.0
+
+    def test_boosts_quiet_audio(self) -> None:
+        audio = _make_sine(1.0, 220.0, 0.02)  # very quiet
+        assert boost_gain(audio, _SR, -14.0, -1.0, 0.4, _TEST_METER) > 1.0
+
+    def test_no_boost_when_already_loud(self) -> None:
+        audio = _make_sine(1.0, 220.0, 0.9)  # already above a very low target
+        assert boost_gain(audio, _SR, -40.0, -1.0, 0.4, _TEST_METER) == 1.0
+
+
+class TestNormalizeStream:
+    """Tests for warm-up-window streaming normalization."""
+
+    def test_applies_single_gain_from_warmup_to_all_chunks(self) -> None:
+        quiet = _make_sine(0.5, 220.0, 0.02)
+        chunks = [quiet.copy() for _ in range(6)]  # 3s total; warmup 1.0s fills after 2 chunks
+
+        out = list(
+            normalize_stream(
+                iter(chunks),
+                _SR,
+                target_lufs=-14.0,
+                true_peak_ceiling_db=-1.0,
+                min_duration_seconds=0.4,
+                warmup_seconds=1.0,
+                meter=_TEST_METER,
+            )
+        )
+
+        assert len(out) == 6
+        base_peak = float(np.max(np.abs(quiet)))
+        ratios = [float(np.max(np.abs(o))) / base_peak for o in out]
+        assert ratios[0] > 1.0  # boosted
+        # One gain measured on the warm-up window, applied uniformly to every chunk.
+        assert all(abs(r - ratios[0]) < 1e-3 for r in ratios)
+
+    def test_passthrough_when_no_boost_needed(self) -> None:
+        loud = _make_sine(0.5, 220.0, 0.9)
+        chunks = [loud.copy() for _ in range(4)]
+
+        out = list(
+            normalize_stream(
+                iter(chunks),
+                _SR,
+                target_lufs=-40.0,  # already above → no boost
+                true_peak_ceiling_db=-1.0,
+                min_duration_seconds=0.4,
+                warmup_seconds=1.0,
+                meter=_TEST_METER,
+            )
+        )
+
+        # gain == 1.0 → chunks passed through as the same objects, untouched.
+        for produced, original in zip(out, chunks, strict=True):
+            assert produced is original
+
+    def test_short_utterance_measures_on_available_audio(self) -> None:
+        quiet = _make_sine(0.5, 220.0, 0.02)
+        chunks = [quiet.copy()]  # only 0.5s, never fills the 2s warm-up window
+
+        out = list(
+            normalize_stream(
+                iter(chunks),
+                _SR,
+                target_lufs=-14.0,
+                true_peak_ceiling_db=-1.0,
+                min_duration_seconds=0.4,
+                warmup_seconds=2.0,
+                meter=_TEST_METER,
+            )
+        )
+
+        assert len(out) == 1
+        assert float(np.max(np.abs(out[0]))) > float(np.max(np.abs(quiet)))  # still boosted
 
 
 class TestPlayStream:
@@ -656,7 +744,23 @@ class TestAudioWorker:
         work_queue.put("hello world")
         work_queue.put(None)
 
-        args = (work_queue, mock_model, "casual_female", tmp_path / "out.wav", _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER, True, 1.0)
+        # audio_worker args: ..., meter, stream=True, streaming_interval, streaming_warmup_seconds
+        args = (
+            work_queue,
+            mock_model,
+            "casual_female",
+            tmp_path / "out.wav",
+            _SR,
+            200,
+            False,
+            -20.0,
+            -1.0,
+            0.5,
+            _TEST_METER,
+            True,
+            1.0,
+            2.0,
+        )
         t = threading.Thread(target=audio_worker, args=args)
         t.start()
         t.join(timeout=5)

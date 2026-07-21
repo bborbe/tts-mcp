@@ -158,6 +158,7 @@ save_wav: true
 simplify_punctuation: false
 stream: true
 streaming_interval: 1.0
+streaming_warmup_seconds: 2.0
 normalize_audio: true
 target_lufs: -20.0
 true_peak_ceiling_db: -1.0
@@ -176,7 +177,8 @@ port: 12000
 | `simplify_punctuation` | Strip commas, replace other marks with periods for cleaner speech |
 | `stream` | Stream playback within each utterance for low latency (`true` or `false`) — see below |
 | `streaming_interval` | Approximate seconds of audio per streamed chunk when `stream` is enabled (e.g. `1.0`) |
-| `normalize_audio` | Enable boost-only LUFS loudness normalization per utterance (`true` or `false`); ignored when `stream` is `true` |
+| `streaming_warmup_seconds` | Warm-up window (seconds) buffered to measure the streaming loudness gain when `stream` and `normalize_audio` are both on (e.g. `2.0`) |
+| `normalize_audio` | Enable boost-only LUFS loudness normalization (`true` or `false`); applied per-utterance when buffered, via a warm-up window when streaming |
 | `target_lufs` | Target integrated loudness in LUFS when `normalize_audio` is enabled (e.g. `-20.0` for podcast mid) |
 | `true_peak_ceiling_db` | Maximum allowed true peak in dBFS after gain is applied (e.g. `-1.0`); measured via 4x oversampling |
 | `min_duration_seconds` | Utterances shorter than this are passed through unchanged (LUFS gating needs ~0.4s) |

@@ -28,7 +28,6 @@ from src.tts import (
     default_output_device_id,
     discover_voices,
     generate_chunks,
-    iter_stream_chunks,
     load_config,
     make_output_path,
     normalize_chunks,
@@ -36,6 +35,7 @@ from src.tts import (
     restart_process_on_device_change,
     simplify_punctuation,
     start_output_device_change_watcher,
+    streaming_chunk_iter,
 )
 
 logger = logging.getLogger("tts-server")
@@ -84,6 +84,7 @@ class ServerState:
         meter: pyln.Meter,
         stream: bool,
         streaming_interval: float,
+        streaming_warmup_seconds: float,
     ) -> None:
         """Initialize server state.
 
@@ -106,6 +107,8 @@ class ServerState:
             meter: Pre-constructed pyloudnorm Meter matching sample_rate.
             stream: Whether to stream playback within each utterance (low latency).
             streaming_interval: Approximate seconds of audio per streamed chunk.
+            streaming_warmup_seconds: Seconds buffered to measure the streaming
+                normalization gain (see normalize_stream).
         """
         self.model: TTSModel | None = model
         self.model_path = model_path
@@ -122,6 +125,7 @@ class ServerState:
         self.meter = meter
         self.stream = stream
         self.streaming_interval = streaming_interval
+        self.streaming_warmup_seconds = streaming_warmup_seconds
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
@@ -419,10 +423,11 @@ def _playback_status_callbacks(
 def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: AudioPlayer) -> None:
     """Process queued requests in streaming mode: play each utterance as it generates.
 
-    Audio starts after the first chunk instead of after the whole utterance.
-    Loudness normalization is not applied (it needs the whole signal). Messages
-    are handled serially; each iteration is wrapped so an unexpected error is
-    logged and the worker keeps running.
+    Audio starts after the first chunk instead of after the whole utterance. When
+    normalization is enabled it is applied via a warm-up window (see
+    normalize_stream) rather than over the whole signal. Messages are handled
+    serially; each iteration is wrapped so an unexpected error is logged and the
+    worker keeps running.
     """
     while True:
         current_item: WorkItem | None = None
@@ -442,7 +447,19 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
             try:
                 play_stream(
                     player,
-                    iter_stream_chunks(model, item.text, item.voice, state.streaming_interval),
+                    streaming_chunk_iter(
+                        model,
+                        item.text,
+                        item.voice,
+                        state.streaming_interval,
+                        state.normalize_audio,
+                        state.sample_rate,
+                        state.target_lufs,
+                        state.true_peak_ceiling_db,
+                        state.min_duration_seconds,
+                        state.streaming_warmup_seconds,
+                        state.meter,
+                    ),
                     output_path,
                     on_complete,
                     on_error,
@@ -551,6 +568,7 @@ class _ServerConfig:
     lead_silence_ms: int
     stream: bool
     streaming_interval: float
+    streaming_warmup_seconds: float
 
 
 def _require(config: dict[str, object], key: str) -> object:
@@ -589,6 +607,7 @@ def _parse_server_config() -> _ServerConfig:
         lead_silence_ms=int(cast(int, _require(config, "lead_silence_ms"))),
         stream=bool(_require(config, "stream")),
         streaming_interval=float(cast(float, _require(config, "streaming_interval"))),
+        streaming_warmup_seconds=float(cast(float, _require(config, "streaming_warmup_seconds"))),
     )
 
 
@@ -620,6 +639,7 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         meter=pyln.Meter(float(cfg.sample_rate)),
         stream=cfg.stream,
         streaming_interval=cfg.streaming_interval,
+        streaming_warmup_seconds=cfg.streaming_warmup_seconds,
     )
 
 

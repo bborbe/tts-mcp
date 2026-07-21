@@ -9,6 +9,7 @@ import termios
 import threading
 import tty
 from pathlib import Path
+from typing import cast
 
 import pyloudnorm as pyln
 
@@ -32,6 +33,24 @@ class NormalizationSettings:
     target_lufs: float
     true_peak_ceiling_db: float
     min_duration_seconds: float
+
+
+@dataclasses.dataclass(frozen=True)
+class CliConfig:
+    """CLI-relevant settings parsed from config.yaml.
+
+    Mirrors the server's _ServerConfig dataclass so both entry paths carry parsed
+    settings as a typed object rather than a positional tuple.
+    """
+
+    sample_rate: int
+    save_wav: bool
+    simplify_punctuation: bool
+    lead_silence_ms: int
+    stream: bool
+    streaming_interval: float
+    streaming_warmup_seconds: float
+    normalization: NormalizationSettings
 
 
 def select_model(models: list[Path]) -> Path:
@@ -247,78 +266,42 @@ def shutdown_worker(work_queue: queue.Queue[str | None], worker: threading.Threa
     worker.join()
 
 
-def load_cli_config() -> tuple[int, bool, bool, int, bool, float, NormalizationSettings]:
+def _require(config: dict[str, object], key: str) -> object:
+    """Fetch a required config key or raise ValueError with a clear message."""
+    value = config.get(key)
+    if value is None:
+        msg = f"Missing required key '{key}' in config.yaml"
+        raise ValueError(msg)
+    return value
+
+
+def load_cli_config() -> CliConfig:
     """Load CLI-relevant settings from config.yaml.
 
     Returns:
-        Tuple of (sample_rate, save_wav, simplify_punctuation, lead_silence_ms,
-        stream, streaming_interval, normalization).
+        A CliConfig with all parsed CLI settings.
 
     Raises:
         ValueError: If required keys are missing from config.yaml.
     """
     config = load_config()
 
-    raw_rate = config.get("sample_rate")
-    if raw_rate is None:
-        msg = "Missing required key 'sample_rate' in config.yaml"
-        raise ValueError(msg)
-
-    raw_save_wav = config.get("save_wav")
-    if raw_save_wav is None:
-        msg = "Missing required key 'save_wav' in config.yaml"
-        raise ValueError(msg)
-
-    raw_normalize = config.get("normalize_audio")
-    if raw_normalize is None:
-        msg = "Missing required key 'normalize_audio' in config.yaml"
-        raise ValueError(msg)
-
-    raw_target_lufs = config.get("target_lufs")
-    if raw_target_lufs is None:
-        msg = "Missing required key 'target_lufs' in config.yaml"
-        raise ValueError(msg)
-
-    raw_tp_ceiling = config.get("true_peak_ceiling_db")
-    if raw_tp_ceiling is None:
-        msg = "Missing required key 'true_peak_ceiling_db' in config.yaml"
-        raise ValueError(msg)
-
-    raw_min_duration = config.get("min_duration_seconds")
-    if raw_min_duration is None:
-        msg = "Missing required key 'min_duration_seconds' in config.yaml"
-        raise ValueError(msg)
-
-    raw_lead_silence = config.get("lead_silence_ms")
-    if raw_lead_silence is None:
-        msg = "Missing required key 'lead_silence_ms' in config.yaml"
-        raise ValueError(msg)
-
-    raw_stream = config.get("stream")
-    if raw_stream is None:
-        msg = "Missing required key 'stream' in config.yaml"
-        raise ValueError(msg)
-
-    raw_streaming_interval = config.get("streaming_interval")
-    if raw_streaming_interval is None:
-        msg = "Missing required key 'streaming_interval' in config.yaml"
-        raise ValueError(msg)
-
     normalization = NormalizationSettings(
-        enabled=bool(raw_normalize),
-        target_lufs=float(raw_target_lufs),
-        true_peak_ceiling_db=float(raw_tp_ceiling),
-        min_duration_seconds=float(raw_min_duration),
+        enabled=bool(_require(config, "normalize_audio")),
+        target_lufs=float(cast(float, _require(config, "target_lufs"))),
+        true_peak_ceiling_db=float(cast(float, _require(config, "true_peak_ceiling_db"))),
+        min_duration_seconds=float(cast(float, _require(config, "min_duration_seconds"))),
     )
 
-    return (
-        int(raw_rate),
-        bool(raw_save_wav),
-        bool(config.get("simplify_punctuation")),
-        int(raw_lead_silence),
-        bool(raw_stream),
-        float(raw_streaming_interval),
-        normalization,
+    return CliConfig(
+        sample_rate=int(cast(int, _require(config, "sample_rate"))),
+        save_wav=bool(_require(config, "save_wav")),
+        simplify_punctuation=bool(config.get("simplify_punctuation")),
+        lead_silence_ms=int(cast(int, _require(config, "lead_silence_ms"))),
+        stream=bool(_require(config, "stream")),
+        streaming_interval=float(cast(float, _require(config, "streaming_interval"))),
+        streaming_warmup_seconds=float(cast(float, _require(config, "streaming_warmup_seconds"))),
+        normalization=normalization,
     )
 
 
@@ -331,7 +314,7 @@ def main() -> None:
         list_outputs(OUTPUT_DIR)
         return
 
-    sample_rate, save_wav, simplify_punct, lead_silence_ms, stream, streaming_interval, normalization = load_cli_config()
+    cfg = load_cli_config()
 
     model_dir = resolve_model_dir(args.model)
     available_voices = discover_voices(Path(model_dir))
@@ -344,11 +327,11 @@ def main() -> None:
 
     print(f"\nLoading model: {model_dir}")
 
-    output_path = make_output_path(OUTPUT_DIR) if save_wav else None
+    output_path = make_output_path(OUTPUT_DIR) if cfg.save_wav else None
     work_queue: queue.Queue[str | None] = queue.Queue()
     ready_queue: queue.Queue[BaseException | None] = queue.Queue(maxsize=1)
 
-    meter = pyln.Meter(float(sample_rate))
+    meter = pyln.Meter(float(cfg.sample_rate))
 
     worker = threading.Thread(
         target=audio_worker_from_model_id,
@@ -357,15 +340,16 @@ def main() -> None:
             model_dir,
             voice,
             output_path,
-            sample_rate,
-            lead_silence_ms,
-            normalization.enabled,
-            normalization.target_lufs,
-            normalization.true_peak_ceiling_db,
-            normalization.min_duration_seconds,
+            cfg.sample_rate,
+            cfg.lead_silence_ms,
+            cfg.normalization.enabled,
+            cfg.normalization.target_lufs,
+            cfg.normalization.true_peak_ceiling_db,
+            cfg.normalization.min_duration_seconds,
             meter,
-            stream,
-            streaming_interval,
+            cfg.stream,
+            cfg.streaming_interval,
+            cfg.streaming_warmup_seconds,
             ready_queue,
         ),
         daemon=True,
@@ -381,7 +365,7 @@ def main() -> None:
     print("Type text. Enter twice submits (single Enter = newline). Enter twice on empty input or ESC twice quits.\n")
 
     if args.text:
-        text = prepare_text(args.text, simplify_punct)
+        text = prepare_text(args.text, cfg.simplify_punctuation)
         if not text:
             print("Error: text is empty after cleaning", file=sys.stderr)
             sys.exit(1)
@@ -393,7 +377,7 @@ def main() -> None:
         result = read_input("Text: ")
         if result is None:
             break
-        text = prepare_text(result, simplify_punct)
+        text = prepare_text(result, cfg.simplify_punctuation)
         if not text:
             continue
         work_queue.put(text)

@@ -39,6 +39,7 @@ def _make_state(
     model_path: str = "test-model-path",
     stream: bool = False,
     streaming_interval: float = 1.0,
+    streaming_warmup_seconds: float = 2.0,
 ) -> ServerState:
     """Create a ServerState for testing.
 
@@ -67,6 +68,7 @@ def _make_state(
         meter=meter,
         stream=stream,
         streaming_interval=streaming_interval,
+        streaming_warmup_seconds=streaming_warmup_seconds,
     )
 
 
