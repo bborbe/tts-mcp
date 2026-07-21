@@ -47,17 +47,6 @@ dev = [
 
     # Architecture
     "pytestarch>=4.0.0",
-
-    # Security & Quality
-    "bandit[toml]>=1.7.8",
-    "deptry>=0.20.0",
-    "pygount>=1.6.4",
-    "codespell>=2.3.0",
-    "pip-audit>=2.7.0",
-    "semgrep>=1.144.0",
-
-    # Git Hooks
-    "pre-commit>=3.6.0",
 ]
 
 [tool.ruff]
@@ -192,64 +181,3 @@ directory = "reports/coverage/html"
 
 [tool.coverage.xml]
 output = "reports/coverage/coverage.xml"
-
-[tool.bandit]
-targets = ["src"]
-exclude = [
-    "tests",
-    ".venv",
-    "venv",
-]
-# Reasonable default for CI
-severity = "MEDIUM"
-confidence = "MEDIUM"
-
-[tool.deptry]
-# Source scanning - only check src/ directory
-extend_exclude = [
-    "build",
-    "dist",
-    "docs",
-    "scripts",
-    "data",
-    "reports",
-    "notes",
-]
-
-# Ignore Jupyter notebooks (not part of production code)
-ignore_notebooks = true
-
-# First-party modules - tell deptry what belongs to this project
-known_first_party = [
-    "src",
-]
-
-# PEP 621 dev dependency groups - these are NOT runtime dependencies
-pep621_dev_dependency_groups = [
-    "dev",
-]
-
-# Keep all rules enabled (DEP001-DEP005)
-ignore = []
-
-# CI/Reporting integration
-json_output = "reports/deptry/deptry.json"
-
-[tool.deptry.per_rule_ignores]
-DEP002 = [
-    "mistral-common",  # Required by mlx-audio for Voxtral TTS tekken tokenizer
-    "pytestarch",  # Used in tests/architecture/ only
-    "tiktoken",  # Required by mlx-audio for Voxtral TTS tokenizer
-    "uvicorn",  # Used as CLI server runner, not imported in source
-]
-
-[tool.codespell]
-# Paths to check
-check-filenames = true
-check-hidden = false
-
-# Directories to skip
-skip = ".git,.venv,venv,build,dist,reports,*.lock,uv.lock"
-
-# Use external ignore file for maintainability
-ignore-words = "config/codespell/ignore.txt"

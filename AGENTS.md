@@ -22,8 +22,8 @@ This file provides guidance to AI agents and AI-assisted development tools when 
 - **NEVER use `git -C <path>`** — always run git commands from the project root directory
 
 ## Testing
-- After **every change** to the code, the tests must be executed
-- Always verify the program runs correctly with `just chat` after modifications
+- After **every change** to the code, the tests must be executed (`make test`)
+- Always verify the program runs correctly with `make chat` after modifications
 
 ## Python Execution Rules
 - Python code must be executed **only** via `uv run ...`
@@ -33,24 +33,22 @@ This file provides guidance to AI agents and AI-assisted development tools when 
   - **Never** use: `pip install`, `python -m pip`, or `uv pip`
 - All dependencies must be managed through `uv` and declared in `pyproject.toml`
 
-## Justfile Conventions
-- **Use `printf` for colored or formatted output** — never `echo` with ANSI escape sequences, as some terminals won't render colors with `echo`. Plain `echo ""` is acceptable only for blank-line spacing.
-- **Add an empty `@echo ""` line before and after each target's command block** to visually separate output between targets.
-- **The `help` target must be a dedicated recipe** with manually written `printf` lines that group related commands and order them by typical execution flow (setup → run → code quality → testing). Never use `just --list`.
-- **The default target (`_default`) must call `just help`.**
-- **Every target must end with a clear status message**: green (`\033[32m`) on success, red (`\033[31m`) on failure with `exit 1`.
-- **Composite targets (e.g. `ci`) must fail fast**: use `set -e` or `&&` chaining.
-- All Python execution in the justfile uses `uv run`, never `python` directly
-- Use `just init` to set up the project
-- Use `just chat` to run the interactive chat
-- Use `just serve` to start the FastAPI TTS server (foreground)
-- Use `just stop` to stop the running server
-- Use `just status` to check if the server is running
-- Use `just destroy` to remove the virtual environment
-- Use `just help` to see all available recipes with descriptions
-- Use `just` (with no arguments) to show help
-- Use `just ci` to run all validation checks (verbose)
-- Use `just ci-quiet` to run all validation checks (silent, fail-fast)
+## Makefile Conventions
+Build tooling follows the standard `bborbe/python-skeleton` layout: a top-level `Makefile` that `include`s `Makefile.variables` and `Makefile.precommit`. All Python execution uses `uv run`, never `python` directly.
+
+- Use `make sync` (alias `make install`) to sync dependencies (`uv sync --all-extras`)
+- Use `make run` to start the FastAPI TTS server (foreground)
+- Use `make chat` to run the interactive CLI
+- Use `make download` to download a Voxtral model into `data/models/`
+- Use `make format` to auto-format + auto-fix with ruff
+- Use `make lint` to check with ruff (read-only)
+- Use `make typecheck` to run mypy + pyright
+- Use `make check` to run lint + typecheck
+- Use `make test` to run pytest (includes `tests/architecture/`)
+- Use `make precommit` to run the full gate (`sync format test check`) — this is what CI runs
+- Use `make clean-local` to remove the venv and caches
+
+Toolchain is intentionally lean (ruff + mypy + pyright + pytest, plus pytestarch architecture tests). No semgrep / bandit / deptry / codespell / pip-audit. CI (`.github/workflows/ci.yml`) runs `make precommit` on a macOS Apple-Silicon runner (mlx-audio + sounddevice are macOS/arm64-only).
 
 ## Project Structure
 - All source code lives in `src/`

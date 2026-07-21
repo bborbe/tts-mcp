@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Conformed the build tooling to the standard `bborbe/python-skeleton` layout: replaced the `justfile` with a `Makefile` (`+ Makefile.variables`, `Makefile.precommit`) exposing `sync` / `run` / `chat` / `download` / `format` / `lint` / `typecheck` / `check` / `test` / `precommit`. The toolchain is now lean — ruff, mypy, pyright, and pytest (including the `tests/architecture/` import-rule tests) — dropping semgrep, bandit, deptry, codespell, pip-audit, and pygount. This also resolved the dependency vulnerabilities: removing semgrep (which hard-pinned `click~=8.1.8` and `mcp==1.23.3`) let `click` float to a patched release and dropped the vulnerable `mcp` entirely, and `pillow` was bumped to 12.3.0 — cutting the locked dependency set from 152 to 84 packages.
+
 ### Added
+
+- GitHub Actions CI (`.github/workflows/ci.yml`) running `make precommit` on push/PR to `main`/`master`, on a macOS Apple-Silicon runner (`mlx-audio` and `sounddevice` are macOS/arm64-only and imported at module load).
 
 - Low-latency streaming playback within a single utterance, toggled by three new required `config.yaml` keys: `stream` (bool), `streaming_interval` (seconds of audio per chunk, e.g. `1.0`), and `streaming_warmup_seconds` (warm-up window for streaming loudness normalization, e.g. `2.0`). When `stream: true`, audio is written to the output device chunk-by-chunk as the model generates it (`model.generate(stream=True)`), so playback starts after the first chunk instead of after the whole utterance is generated and normalized — the previous behavior effectively buffered the entire WAV before any sound (measured: time-to-first-sound dropped from ~2.6s to ~0.4s on an 8s utterance). When `stream: false`, the prior buffered path with cross-utterance lookahead is used unchanged.
 - Warm-up-window loudness normalization for streaming mode: whole-signal LUFS can't be measured before playback, so the first `streaming_warmup_seconds` of audio are buffered, a single boost-only, true-peak-capped gain is measured on that window (ITU-R BS.1770-4, same as the buffered path), and that gain is applied to every streamed chunk (later chunks hard-limited to the true-peak ceiling to avoid clipping). This restores loudness parity with the buffered path for quiet voices while keeping most of the latency win — instead of streamed audio playing many dB quieter than buffered. The gain computation is shared with the buffered path via the extracted `boost_gain` helper.

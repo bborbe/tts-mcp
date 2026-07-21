@@ -1,0 +1,30 @@
+.PHONY: precommit
+# Run all precommit checks (sync is defined in main Makefile)
+precommit: sync format test check
+	@echo "All precommit checks passed"
+
+.PHONY: format
+# Format code with ruff
+format:
+	uv run ruff format .
+	uv run ruff check --fix . || true
+
+.PHONY: lint
+# Lint code with ruff
+lint:
+	uv run ruff check .
+
+.PHONY: typecheck
+# Type check with mypy and pyright
+typecheck:
+	uv run mypy src
+	uv run pyright
+
+.PHONY: check
+# Run lint and typecheck
+check: lint typecheck
+
+.PHONY: test
+# Run tests with pytest (includes tests/architecture)
+test: sync
+	uv run pytest

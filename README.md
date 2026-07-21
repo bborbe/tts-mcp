@@ -28,7 +28,7 @@ There are two independent entry paths into the system. The interactive CLI (`src
 ```text
 ┌───────────────────────────┐  ┌───────────────────────────┐  ┌───────────────────────────┐
 │         AI Agent          │  │        HTTP Client        │  │       Terminal User       │
-│   Claude Code / Desktop   │  │      curl / scripts       │  │         just chat         │
+│   Claude Code / Desktop   │  │      curl / scripts       │  │         make chat         │
 └─────────────┬─────────────┘  └─────────────┬─────────────┘  └─────────────┬─────────────┘
               │ MCP (stdio)                  │ HTTP                         │
               ▼                              │                              ▼
@@ -76,7 +76,7 @@ There are two independent entry paths into the system. The interactive CLI (`src
 - **Apple Silicon Mac** — MLX requires Apple Silicon (M1/M2/M3/M4)
 - **Python 3.12+**
 - **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
-- **just** — Command runner ([install](https://github.com/casey/just#installation))
+- **make** — preinstalled with the Xcode Command Line Tools
 - **Node.js 18+** — For the MCP server (optional)
 
 ## Project Structure
@@ -97,28 +97,25 @@ There are two independent entry paths into the system. The interactive CLI (`src
 │   └── test-concurrent-say.py  # Concurrent /say load test
 ├── mcp/                    # MCP server (TypeScript)
 │   └── tts-mcp.ts          # MCP relay to FastAPI server
-├── config/                 # Static analysis rules
-│   ├── semgrep/            # Semgrep custom rules
-│   └── codespell/          # Spell-check configuration
 ├── data/
 │   └── output/             # Generated WAV files
 ├── config.yaml             # Local configuration (gitignored)
-├── justfile                # Command recipes
+├── Makefile                # Build/dev targets (+ Makefile.variables, Makefile.precommit)
 └── pyproject.toml          # Project metadata and dependencies
 ```
 
 ## Setup
 
 ```bash
-just init
+make sync
 ```
 
-Creates report directories and installs all dependencies via `uv sync --all-extras`.
+Installs all dependencies via `uv sync --all-extras`.
 
 ### Download a Model
 
 ```bash
-just download
+make download
 ```
 
 Presents three Voxtral 4B variants to choose from:
@@ -133,10 +130,10 @@ After downloading, update `config.yaml` with the model path.
 
 ### Getting Started
 
-1. Run `just init` — installs dependencies and prompts to download a model if none exists
-2. Run `just download` — downloads a Voxtral model (if not already triggered by init)
+1. Run `make sync` — installs all dependencies
+2. Run `make download` — downloads a Voxtral model
 3. Create `config.yaml` with the model path and server settings (see Configuration below)
-4. Run `just serve` — starts the TTS server
+4. Run `make run` — starts the TTS server
 5. Send requests via the API, CLI, or MCP bridge
 
 ## Configuration
@@ -212,15 +209,13 @@ utterance-level loudness normalization following ITU-R BS.1770-4 (the EBU R128 s
 
 | Command | Description |
 |---------|-------------|
-| `just chat` | Start the interactive chat |
-| `just serve` | Start the FastAPI TTS server (foreground) |
-| `just stop` | Stop the running server |
-| `just status` | Check if the server is running |
+| `make chat` | Start the interactive CLI |
+| `make run` | Start the FastAPI TTS server (foreground) |
 
 ### CLI
 
 ```bash
-just chat
+make chat
 ```
 
 Prompts for model and voice selection, then enters an interactive loop. Type text and press Enter twice to submit. Press ESC twice to quit.
@@ -234,7 +229,7 @@ uv run -m src.main "Hello world" --voice casual_female
 ### Server
 
 ```bash
-just serve
+make run
 ```
 
 Starts a FastAPI server with queued playback. The server loads the model once at startup and processes requests sequentially through a background worker.
@@ -301,35 +296,20 @@ The MCP server reads `config.yaml` from the project root to determine the server
 
 ## Development
 
-### Code Quality
+Build tooling follows the standard `bborbe/python-skeleton` layout: a `Makefile` that includes `Makefile.variables` and `Makefile.precommit`. The toolchain is intentionally lean — ruff (format + lint), mypy + pyright (type checking), and pytest (including `tests/architecture/` import-rule tests via pytestarch).
 
 | Command | Description |
 |---------|-------------|
-| `just code-format` | Auto-fix code style and formatting |
-| `just code-style` | Check code style and formatting (read-only) |
-| `just code-typecheck` | Run static type checking with mypy |
-| `just code-lspchecks` | Run strict type checking with Pyright (LSP-based) |
-| `just code-security` | Run security checks with bandit |
-| `just code-deptry` | Check dependency hygiene with deptry |
-| `just code-spell` | Check spelling in code and documentation |
-| `just code-semgrep` | Run Semgrep static analysis |
-| `just code-audit` | Scan dependencies for known vulnerabilities |
-| `just code-architecture` | Run architecture import rule tests |
-| `just code-stats` | Generate code statistics with pygount |
-
-### Testing
-
-| Command | Description |
-|---------|-------------|
-| `just test` | Run unit tests (fast) |
-| `just test-coverage` | Run unit tests with coverage report (80% threshold) |
+| `make format` | Auto-format and auto-fix with ruff |
+| `make lint` | Check with ruff (read-only) |
+| `make typecheck` | Type-check with mypy + pyright |
+| `make check` | Run lint + typecheck |
+| `make test` | Run the test suite (incl. architecture tests) |
+| `make precommit` | Full gate: `sync format test check` — what CI runs |
 
 ### CI
 
-- `just ci` — Run all validation checks (verbose)
-- `just ci-quiet` — Run all checks (silent, fail-fast)
-
-The CI pipeline runs in order: init, code-format, code-style, code-typecheck, code-security, code-deptry, code-spell, code-semgrep, code-audit, test, code-architecture, code-lspchecks.
+`.github/workflows/ci.yml` runs `make precommit` on push and PR to `main`/`master`. It uses a **macOS Apple-Silicon runner** because `mlx-audio` (MLX/Metal) and `sounddevice` (PortAudio) are macOS/arm64-only and are imported at module load.
 
 ## AI-Assisted Development
 
