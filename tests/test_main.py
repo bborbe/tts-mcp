@@ -22,6 +22,8 @@ def _base_cli_config() -> dict[str, object]:
         "true_peak_ceiling_db": -1.0,
         "min_duration_seconds": 0.5,
         "lead_silence_ms": 200,
+        "stream": False,
+        "streaming_interval": 1.0,
     }
 
 
@@ -31,12 +33,14 @@ class TestLoadCliConfig:
     def test_loads_lead_silence_ms(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("src.main.load_config", _base_cli_config)
 
-        sample_rate, save_wav, simplify_punctuation, lead_silence_ms, normalization = load_cli_config()
+        sample_rate, save_wav, simplify_punctuation, lead_silence_ms, stream, streaming_interval, normalization = load_cli_config()
 
         assert sample_rate == 24000
         assert save_wav is True
         assert simplify_punctuation is False
         assert lead_silence_ms == 200
+        assert stream is False
+        assert streaming_interval == 1.0
         assert normalization.enabled is True
 
     def test_raises_when_lead_silence_ms_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:

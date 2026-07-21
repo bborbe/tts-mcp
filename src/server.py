@@ -8,7 +8,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
@@ -28,9 +28,11 @@ from src.tts import (
     default_output_device_id,
     discover_voices,
     generate_chunks,
+    iter_stream_chunks,
     load_config,
     make_output_path,
     normalize_chunks,
+    play_stream,
     restart_process_on_device_change,
     simplify_punctuation,
     start_output_device_change_watcher,
@@ -80,6 +82,8 @@ class ServerState:
         true_peak_ceiling_db: float,
         min_duration_seconds: float,
         meter: pyln.Meter,
+        stream: bool,
+        streaming_interval: float,
     ) -> None:
         """Initialize server state.
 
@@ -100,6 +104,8 @@ class ServerState:
             true_peak_ceiling_db: Maximum true-peak level in dBFS after gain.
             min_duration_seconds: Minimum utterance length to attempt normalization.
             meter: Pre-constructed pyloudnorm Meter matching sample_rate.
+            stream: Whether to stream playback within each utterance (low latency).
+            streaming_interval: Approximate seconds of audio per streamed chunk.
         """
         self.model: TTSModel | None = model
         self.model_path = model_path
@@ -114,6 +120,8 @@ class ServerState:
         self.true_peak_ceiling_db = true_peak_ceiling_db
         self.min_duration_seconds = min_duration_seconds
         self.meter = meter
+        self.stream = stream
+        self.streaming_interval = streaming_interval
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
@@ -301,24 +309,7 @@ def _start_playback(
 
     work_item, chunks = pending
     done = threading.Event()
-
-    def on_complete(output_path: Path | None) -> None:
-        with state.status_lock:
-            ms = state.statuses[work_item.message_id]
-            ms.status = "completed"
-            ms.audio_file = str(output_path) if output_path is not None else None
-            ms.completed_at = time.time()
-        logger.debug("Playback completed for %s -> %s", work_item.message_id, output_path)
-        done.set()
-
-    def on_error(exc: Exception) -> None:
-        logger.error("Playback failed for %s: %s", work_item.message_id, exc)
-        with state.status_lock:
-            ms = state.statuses[work_item.message_id]
-            ms.status = "error"
-            ms.error = str(exc)
-            ms.completed_at = time.time()
-        done.set()
+    on_complete, on_error = _playback_status_callbacks(state, work_item, done)
 
     with state.status_lock:
         state.statuses[work_item.message_id].status = "playing"
@@ -397,16 +388,135 @@ def _generate_item(state: ServerState, model: TTSModel, item: WorkItem) -> list[
         return None
 
 
+def _playback_status_callbacks(
+    state: ServerState,
+    item: WorkItem,
+    done: threading.Event,
+) -> tuple[Callable[[Path | None], None], Callable[[Exception], None]]:
+    """Build on_complete/on_error callbacks that record playback status for one item."""
+
+    def on_complete(output_path: Path | None) -> None:
+        with state.status_lock:
+            ms = state.statuses[item.message_id]
+            ms.status = "completed"
+            ms.audio_file = str(output_path) if output_path is not None else None
+            ms.completed_at = time.time()
+        logger.debug("Playback completed for %s -> %s", item.message_id, output_path)
+        done.set()
+
+    def on_error(exc: Exception) -> None:
+        logger.error("Playback failed for %s: %s", item.message_id, exc)
+        with state.status_lock:
+            ms = state.statuses[item.message_id]
+            ms.status = "error"
+            ms.error = str(exc)
+            ms.completed_at = time.time()
+        done.set()
+
+    return on_complete, on_error
+
+
+def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: AudioPlayer) -> None:
+    """Process queued requests in streaming mode: play each utterance as it generates.
+
+    Audio starts after the first chunk instead of after the whole utterance.
+    Loudness normalization is not applied (it needs the whole signal). Messages
+    are handled serially; each iteration is wrapped so an unexpected error is
+    logged and the worker keeps running.
+    """
+    while True:
+        current_item: WorkItem | None = None
+        try:
+            item = state.work_queue.get()
+            if item is None:
+                break
+            current_item = item
+
+            with state.status_lock:
+                state.statuses[item.message_id].status = "playing"
+
+            done = threading.Event()
+            on_complete, on_error = _playback_status_callbacks(state, item, done)
+            output_path = make_output_path(OUTPUT_DIR) if state.save_wav else None
+
+            try:
+                play_stream(
+                    player,
+                    iter_stream_chunks(model, item.text, item.voice, state.streaming_interval),
+                    output_path,
+                    on_complete,
+                    on_error,
+                )
+            except (RuntimeError, ValueError) as exc:
+                logger.error("TTS generation failed for %s: %s", item.message_id, exc)
+                _fail_item(state, item.message_id, str(exc))
+                done.set()
+
+            done.wait()
+            state.work_queue.task_done()
+
+        except Exception as exc:
+            logger.error("Audio worker caught unexpected error (recovering): %s", exc, exc_info=True)
+            if current_item is not None:
+                _fail_item(state, current_item.message_id, f"unexpected worker error: {exc}")
+                with contextlib.suppress(ValueError):
+                    state.work_queue.task_done()
+
+
+def _run_buffered_server_loop(state: ServerState, model: TTSModel, player: AudioPlayer) -> None:
+    """Process queued requests in buffered mode with cross-message lookahead.
+
+    Generates the full utterance (and optional loudness normalization) before
+    playback, generating the next message while the current one still plays.
+    """
+    pending: tuple[WorkItem, list[np.ndarray]] | None = None
+    playback_done: threading.Event | None = None
+
+    while True:
+        current_item: WorkItem | None = None
+        try:
+            if pending is not None:
+                playback_done = _start_playback(state, player, pending, playback_done)
+                pending = None
+
+            item = state.work_queue.get()
+            if item is None:
+                if playback_done is not None:
+                    playback_done.wait()
+                break
+
+            current_item = item
+
+            chunks = _generate_item(state, model, item)
+            if chunks is not None:
+                pending = (item, chunks)
+
+            state.work_queue.task_done()
+
+        except Exception as exc:
+            logger.error(
+                "Audio worker caught unexpected error (recovering): %s",
+                exc,
+                exc_info=True,
+            )
+            if current_item is not None:
+                _fail_item(state, current_item.message_id, f"unexpected worker error: {exc}")
+                with contextlib.suppress(ValueError):
+                    state.work_queue.task_done()
+
+    if pending is not None:
+        playback_done = _start_playback(state, player, pending, playback_done)
+        playback_done.wait()
+
+
 def server_audio_worker(state: ServerState) -> None:
     """Background worker that processes queued TTS requests sequentially.
 
     Loads the model on this thread when it was not pre-loaded (see
-    _load_worker_model), because MLX GPU streams are thread-local.
-
-    Uses lookahead pattern: generates chunks for the next message while
-    the current one is still playing.  Wraps each iteration in a top-level
-    handler so that unexpected exceptions are logged and the worker keeps
-    running instead of dying silently.
+    _load_worker_model), because MLX GPU streams are thread-local. Dispatches to
+    the streaming or buffered loop based on state.stream. Both wrap each
+    iteration in a top-level handler so unexpected exceptions are logged and the
+    worker keeps running instead of dying silently.
 
     Args:
         state: Server state with work queue, model, and status tracking.
@@ -416,45 +526,11 @@ def server_audio_worker(state: ServerState) -> None:
         return
 
     player = AudioPlayer(state.sample_rate, state.lead_silence_ms)
-    pending: tuple[WorkItem, list[np.ndarray]] | None = None
-    playback_done: threading.Event | None = None
-
     try:
-        while True:
-            current_item: WorkItem | None = None
-            try:
-                if pending is not None:
-                    playback_done = _start_playback(state, player, pending, playback_done)
-                    pending = None
-
-                item = state.work_queue.get()
-                if item is None:
-                    if playback_done is not None:
-                        playback_done.wait()
-                    break
-
-                current_item = item
-
-                chunks = _generate_item(state, model, item)
-                if chunks is not None:
-                    pending = (item, chunks)
-
-                state.work_queue.task_done()
-
-            except Exception as exc:
-                logger.error(
-                    "Audio worker caught unexpected error (recovering): %s",
-                    exc,
-                    exc_info=True,
-                )
-                if current_item is not None:
-                    _fail_item(state, current_item.message_id, f"unexpected worker error: {exc}")
-                    with contextlib.suppress(ValueError):
-                        state.work_queue.task_done()
-
-        if pending is not None:
-            playback_done = _start_playback(state, player, pending, playback_done)
-            playback_done.wait()
+        if state.stream:
+            _run_streaming_server_loop(state, model, player)
+        else:
+            _run_buffered_server_loop(state, model, player)
     finally:
         player.close()
 
@@ -473,6 +549,8 @@ class _ServerConfig:
     true_peak_ceiling_db: float
     min_duration_seconds: float
     lead_silence_ms: int
+    stream: bool
+    streaming_interval: float
 
 
 def _require(config: dict[str, object], key: str) -> object:
@@ -509,6 +587,8 @@ def _parse_server_config() -> _ServerConfig:
         true_peak_ceiling_db=float(cast(float, _require(config, "true_peak_ceiling_db"))),
         min_duration_seconds=float(cast(float, _require(config, "min_duration_seconds"))),
         lead_silence_ms=int(cast(int, _require(config, "lead_silence_ms"))),
+        stream=bool(_require(config, "stream")),
+        streaming_interval=float(cast(float, _require(config, "streaming_interval"))),
     )
 
 
@@ -538,6 +618,8 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         true_peak_ceiling_db=cfg.true_peak_ceiling_db,
         min_duration_seconds=cfg.min_duration_seconds,
         meter=pyln.Meter(float(cfg.sample_rate)),
+        stream=cfg.stream,
+        streaming_interval=cfg.streaming_interval,
     )
 
 

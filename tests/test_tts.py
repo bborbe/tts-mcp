@@ -2,6 +2,7 @@
 
 import queue
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from src.tts import (
     DEFAULT_CONFIG_PATH,
     AudioPlayer,
     PlaybackJob,
+    StreamingPlaybackJob,
     audio_worker,
     clean_text,
     config_env_var,
@@ -21,11 +23,13 @@ from src.tts import (
     discover_voices,
     generate_chunks,
     generate_speech,
+    iter_stream_chunks,
     load_config,
     make_output_path,
     normalize_chunks,
     play_audio,
     play_chunks,
+    play_stream,
     resolve_config_path,
     save_audio,
     simplify_punctuation,
@@ -36,14 +40,24 @@ _SR = 24000
 _TEST_METER = pyln.Meter(float(_SR))
 
 
+def _drain(q: "queue.Queue[np.ndarray | None]") -> list[np.ndarray | None]:
+    """Drain all currently-queued items from a queue without blocking."""
+    items: list[np.ndarray | None] = []
+    while True:
+        try:
+            items.append(q.get_nowait())
+        except queue.Empty:
+            return items
+
+
 def _worker_args(
     work_queue: queue.Queue[str | None],
     model: MagicMock,
     voice: str,
     output_path: Path | None,
-) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, int, bool, float, float, float, pyln.Meter]:
-    """Build the positional args tuple for audio_worker with normalization disabled."""
-    return (work_queue, model, voice, output_path, _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER)
+) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, int, int, bool, float, float, float, pyln.Meter, bool, float]:
+    """Build the positional args tuple for audio_worker (buffered mode, normalization disabled)."""
+    return (work_queue, model, voice, output_path, _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER, False, 1.0)
 
 
 def _make_sine(duration_s: float, freq_hz: float, amplitude: float, sample_rate: int = _SR) -> np.ndarray:
@@ -269,6 +283,111 @@ class TestGenerateChunks:
         generate_chunks(mock_model, "test text", "neutral_male")
 
         mock_model.generate.assert_called_once_with(text="test text", voice="neutral_male")
+
+
+class TestIterStreamChunks:
+    """Tests for the iter_stream_chunks streaming generator."""
+
+    def test_yields_chunks_and_requests_streaming(self) -> None:
+        mock_model = MagicMock()
+        c1 = MagicMock(audio=np.ones(100, dtype=np.float32))
+        c2 = MagicMock(audio=np.ones(200, dtype=np.float32))
+        mock_model.generate.return_value = [c1, c2]
+
+        result = list(iter_stream_chunks(mock_model, "hello", "casual_female", 1.5))
+
+        assert [len(c) for c in result] == [100, 200]
+        assert all(c.dtype == np.float32 for c in result)
+        mock_model.generate.assert_called_once_with(text="hello", voice="casual_female", stream=True, streaming_interval=1.5)
+
+    def test_skips_zero_length_final_marker(self) -> None:
+        mock_model = MagicMock()
+        c1 = MagicMock(audio=np.ones(100, dtype=np.float32))
+        empty = MagicMock(audio=np.zeros(0, dtype=np.float32))
+        mock_model.generate.return_value = [c1, empty]
+
+        result = list(iter_stream_chunks(mock_model, "hello", "de_male", 1.0))
+
+        assert len(result) == 1
+        assert len(result[0]) == 100
+
+
+class TestPlayStream:
+    """Tests for the play_stream producer helper."""
+
+    def test_feeds_chunks_then_sentinel(self) -> None:
+        submitted: list[StreamingPlaybackJob] = []
+        player = MagicMock()
+        player.submit_stream.side_effect = submitted.append
+
+        chunks = [np.ones(3, dtype=np.float32), np.ones(4, dtype=np.float32)]
+        play_stream(player, iter(chunks), None, None, None)
+
+        assert len(submitted) == 1
+        drained = _drain(submitted[0].chunk_source)
+        assert [None if c is None else len(c) for c in drained] == [3, 4, None]
+
+    def test_sends_sentinel_even_when_generation_raises(self) -> None:
+        submitted: list[StreamingPlaybackJob] = []
+        player = MagicMock()
+        player.submit_stream.side_effect = submitted.append
+
+        def _boom() -> "Iterator[np.ndarray]":
+            yield np.ones(2, dtype=np.float32)
+            raise RuntimeError("gen failed")
+
+        with pytest.raises(RuntimeError, match="gen failed"):
+            play_stream(player, _boom(), None, None, None)
+
+        drained = _drain(submitted[0].chunk_source)
+        assert drained[-1] is None
+
+
+class TestAudioPlayerStreaming:
+    """Tests for AudioPlayer streaming playback jobs."""
+
+    @pytest.fixture(autouse=True)
+    def _stable_default_device(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: 1)
+
+    @patch("src.tts.sd")
+    def test_writes_streamed_chunks_and_saves(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
+
+        source: queue.Queue[np.ndarray | None] = queue.Queue()
+        for chunk in (np.ones(3, dtype=np.float32), np.ones(4, dtype=np.float32)):
+            source.put(chunk)
+        source.put(None)
+
+        completed: list[Path | None] = []
+        output_path = tmp_path / "stream.wav"
+        player.submit_stream(StreamingPlaybackJob(chunk_source=source, output_path=output_path, on_complete=completed.append))
+        player.close()
+
+        # Lead silence (1) + two streamed chunks = 3 writes.
+        assert mock_stream.write.call_count == 3
+        assert completed == [output_path]
+        assert output_path.exists()
+
+    @patch("src.tts.sd")
+    def test_streaming_job_reports_error(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = [None, RuntimeError("device lost")]
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=200)
+
+        source: queue.Queue[np.ndarray | None] = queue.Queue()
+        source.put(np.ones(3, dtype=np.float32))
+        source.put(None)
+
+        errors: list[Exception] = []
+        player.submit_stream(StreamingPlaybackJob(chunk_source=source, output_path=None, on_error=errors.append))
+        player.close()
+
+        assert len(errors) == 1
+        assert "device lost" in str(errors[0])
 
 
 class TestPlayChunks:
@@ -523,6 +642,30 @@ class TestAudioWorker:
         assert not t.is_alive()
         mock_model.generate.assert_called_once_with(text="hello world", voice="casual_female")
         assert mock_stream.write.call_count == 2
+
+    @patch("src.tts.sd")
+    def test_streaming_mode_plays_chunks_as_generated(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_model = MagicMock()
+        c1 = MagicMock(audio=np.ones(100, dtype=np.float32))
+        c2 = MagicMock(audio=np.ones(200, dtype=np.float32))
+        mock_model.generate.return_value = [c1, c2]
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+
+        work_queue: queue.Queue[str | None] = queue.Queue()
+        work_queue.put("hello world")
+        work_queue.put(None)
+
+        args = (work_queue, mock_model, "casual_female", tmp_path / "out.wav", _SR, 200, False, -20.0, -1.0, 0.5, _TEST_METER, True, 1.0)
+        t = threading.Thread(target=audio_worker, args=args)
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        mock_model.generate.assert_called_once_with(text="hello world", voice="casual_female", stream=True, streaming_interval=1.0)
+        # Lead silence (1) + two streamed chunks = 3 writes.
+        assert mock_stream.write.call_count == 3
+        assert (tmp_path / "out.wav").exists()
 
 
 class TestMakeOutputPath:

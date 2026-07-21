@@ -37,6 +37,8 @@ def _make_state(
     meter: pyln.Meter | None = None,
     preload_model: bool = True,
     model_path: str = "test-model-path",
+    stream: bool = False,
+    streaming_interval: float = 1.0,
 ) -> ServerState:
     """Create a ServerState for testing.
 
@@ -63,6 +65,8 @@ def _make_state(
         true_peak_ceiling_db=true_peak_ceiling_db,
         min_duration_seconds=min_duration_seconds,
         meter=meter,
+        stream=stream,
+        streaming_interval=streaming_interval,
     )
 
 
@@ -100,6 +104,21 @@ class _ImmediateAudioPlayer:
                 job.on_complete(job.output_path)
         finally:
             _ImmediateAudioPlayer.active_count -= 1
+
+    def submit_stream(self, job: Any) -> None:
+        # Mirror the real player: drain the chunk queue on a background thread so
+        # the producer (play_stream) can feed chunks after submit_stream returns.
+        def _run() -> None:
+            while job.chunk_source.get() is not None:
+                pass
+            if _ImmediateAudioPlayer.playback_error is not None:
+                if job.on_error is not None:
+                    job.on_error(_ImmediateAudioPlayer.playback_error)
+                return
+            if job.on_complete is not None:
+                job.on_complete(job.output_path)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def close(self) -> None:
         return
@@ -503,6 +522,40 @@ class TestServerAudioWorker:
         with state.status_lock:
             assert state.statuses[msg_id].status == "completed"
             assert state.statuses[msg_id].audio_file is not None
+
+    def test_streaming_mode_completes_message(self) -> None:
+        state = _make_state(stream=True)
+        c1 = MagicMock(audio=np.ones(100, dtype=np.float32))
+        c2 = MagicMock(audio=np.ones(200, dtype=np.float32))
+        model = cast(Any, state.model)
+        model.generate.return_value = [c1, c2]
+
+        msg_id = "msg_stream_001"
+        with state.status_lock:
+            state.statuses[msg_id] = MessageStatus(
+                message_id=msg_id,
+                status="queued",
+                text="Hello",
+                audio_file=None,
+                error=None,
+                completed_at=None,
+            )
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        model.generate.assert_called_once_with(
+            text="Hello",
+            voice="casual_female",
+            stream=True,
+            streaming_interval=state.streaming_interval,
+        )
+        with state.status_lock:
+            assert state.statuses[msg_id].status == "completed"
 
     def test_processes_multiple_messages_sequentially(self) -> None:
         state = _make_state()

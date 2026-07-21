@@ -8,7 +8,7 @@ Local text-to-speech powered by Mistral's Voxtral model via MLX, with real-time 
 
 | Feature | Description |
 |---------|-------------|
-| Streaming Playback | Real-time audio generation with lookahead — generates the next chunk while the current one plays |
+| Streaming Playback | Plays each utterance as it generates (chunk-by-chunk) for low latency; a buffered mode with cross-message lookahead and loudness normalization is also available |
 | Interactive CLI | Terminal interface with model/voice selection, ESC to quit, and backspace support |
 | REST API Server | FastAPI server with queued sequential playback and message status tracking |
 | MCP Server | Ready-to-use MCP bridge for Claude Code and Claude Desktop integration |
@@ -19,11 +19,11 @@ Under the hood, the project uses [mlx-audio](https://github.com/Blaizzy/mlx-audi
 
 ## Design Principles
 
-All configuration is explicit — no hardcoded defaults, no silent fallbacks. If a required value is missing from `config.yaml`, the application fails immediately with a clear error message. Audio files are saved to `data/output/` as WAV files with timestamps. The server uses a background worker thread with a lookahead pattern: it generates audio for the next request while the current one is still playing, eliminating gaps between consecutive messages.
+All configuration is explicit — no hardcoded defaults, no silent fallbacks. If a required value is missing from `config.yaml`, the application fails immediately with a clear error message. Audio files are saved to `data/output/` as WAV files with timestamps. A background worker thread owns audio generation and playback: in streaming mode (`stream: true`) it plays each utterance chunk-by-chunk as it is generated for low latency; in buffered mode (`stream: false`) it generates and loudness-normalizes the full utterance before playback, generating the next queued request while the current one plays to eliminate gaps between messages.
 
 ## Architecture
 
-There are two independent entry paths into the system. The interactive CLI (`src/main.py`) resolves the model and voice, then starts a worker that loads the model and runs generation on the same thread. The FastAPI server (`src/server.py`) loads the model once at startup and serializes all requests through a work queue and a background audio worker with lookahead generation. AI agents reach the server through the MCP relay (`mcp/tts-mcp.ts`), a thin stdio-to-HTTP bridge; any plain HTTP client can call the REST API directly. In both paths, inference runs on the Apple Silicon GPU via MLX (Metal), with the Voxtral model weights held in unified memory.
+There are two independent entry paths into the system. The interactive CLI (`src/main.py`) resolves the model and voice, then starts a worker that loads the model and runs generation on the same thread. The FastAPI server (`src/server.py`) loads the model once at startup and serializes all requests through a work queue and a background audio worker (streaming or buffered per the `stream` setting). AI agents reach the server through the MCP relay (`mcp/tts-mcp.ts`), a thin stdio-to-HTTP bridge; any plain HTTP client can call the REST API directly. In both paths, inference runs on the Apple Silicon GPU via MLX (Metal), with the Voxtral model weights held in unified memory.
 
 ```text
 ┌───────────────────────────┐  ┌───────────────────────────┐  ┌───────────────────────────┐
@@ -47,7 +47,7 @@ There are two independent entry paths into the system. The interactive CLI (`src
 │             GET /health                                    │              │
 │      │                                                     │              │
 │      ▼                                                     │              │
-│  work queue ───▶ audio worker thread (lookahead)           │              │
+│  work queue ───▶ audio worker thread (streaming / lookahead)│              │
 └─────────────────────────────────────────────────┬──────────┘              │
                                                   │                         │
                                                   ▼                         ▼
@@ -156,6 +156,8 @@ sample_rate: 24000
 default_voice: casual_female
 save_wav: true
 simplify_punctuation: false
+stream: true
+streaming_interval: 1.0
 normalize_audio: true
 target_lufs: -20.0
 true_peak_ceiling_db: -1.0
@@ -172,12 +174,22 @@ port: 12000
 | `default_voice` | Default voice for server requests without a voice override |
 | `save_wav` | Save generated audio to WAV files in `data/output/` (`true` or `false`) |
 | `simplify_punctuation` | Strip commas, replace other marks with periods for cleaner speech |
-| `normalize_audio` | Enable boost-only LUFS loudness normalization per utterance (`true` or `false`) |
+| `stream` | Stream playback within each utterance for low latency (`true` or `false`) — see below |
+| `streaming_interval` | Approximate seconds of audio per streamed chunk when `stream` is enabled (e.g. `1.0`) |
+| `normalize_audio` | Enable boost-only LUFS loudness normalization per utterance (`true` or `false`); ignored when `stream` is `true` |
 | `target_lufs` | Target integrated loudness in LUFS when `normalize_audio` is enabled (e.g. `-20.0` for podcast mid) |
 | `true_peak_ceiling_db` | Maximum allowed true peak in dBFS after gain is applied (e.g. `-1.0`); measured via 4x oversampling |
 | `min_duration_seconds` | Utterances shorter than this are passed through unchanged (LUFS gating needs ~0.4s) |
 | `host` | Server listen address |
 | `port` | Server listen port |
+
+### Streaming playback
+
+With `stream: true` (the default), each utterance is played **as it is generated**: the model emits audio in chunks of roughly `streaming_interval` seconds, and each chunk is written to the output device as soon as it is decoded. Playback therefore starts after the first chunk instead of after the whole utterance has been generated, cutting the time-to-first-sound from the full generation time to a fraction of a second.
+
+With `stream: false`, the server/CLI use the buffered path instead: the full utterance is generated (and loudness-normalized) before playback begins, while the next queued message is generated in the background so there is no gap between consecutive messages.
+
+Trade-off: loudness normalization needs the whole signal and is therefore **not applied in streaming mode**. Choose `stream: true` for responsiveness (interactive/agent use) and `stream: false` when consistent normalized loudness across voices matters more than latency.
 
 ### Loudness normalization
 

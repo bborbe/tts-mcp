@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Low-latency streaming playback within a single utterance, toggled by two new required `config.yaml` keys: `stream` (bool) and `streaming_interval` (seconds of audio per chunk, e.g. `1.0`). When `stream: true`, audio is written to the output device chunk-by-chunk as the model generates it (`model.generate(stream=True)`), so playback starts after the first chunk instead of after the whole utterance is generated and normalized — the previous behavior effectively buffered the entire WAV before any sound. When `stream: false`, the prior buffered path with cross-utterance lookahead and loudness normalization is used unchanged. Loudness normalization is skipped in streaming mode because it requires the whole signal; use `stream: false` when consistent normalized output matters more than latency.
 - Config file location is now resolved in precedence order: `$TTS_MCP_CONFIG` → `$XDG_CONFIG_HOME/tts-mcp/config.yaml` (defaults to `~/.config/tts-mcp/config.yaml`) → `./config.yaml` (project-root fallback). Both the Python server/CLI and the TypeScript MCP relay honor the same order, so machine-local config can live outside the repo. `model:`/`models_dir:`/data paths stay relative to the working directory, not the config file.
 
 ### Changed

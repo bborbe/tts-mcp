@@ -69,8 +69,15 @@ class GenerationResult(Protocol):
 class TTSModel(Protocol):
     """Protocol for a TTS model that supports streaming generation."""
 
-    def generate(self, text: str, voice: str) -> Iterator[GenerationResult]:
-        """Generate speech audio chunks from text."""
+    def generate(self, text: str, voice: str, **kwargs: object) -> Iterator[GenerationResult]:
+        """Generate speech audio chunks from text.
+
+        Additional keyword arguments are forwarded to the underlying model. In
+        particular ``stream=True`` makes the model yield intermediate audio chunks
+        during generation (roughly ``streaming_interval`` seconds of audio each)
+        for low-latency playback; without it the model yields a single result once
+        the whole utterance has been decoded.
+        """
         ...
 
 
@@ -245,6 +252,30 @@ def generate_speech(model_id: str, text: str, voice: str) -> np.ndarray:
         raise RuntimeError(msg)
 
     return np.concatenate(audio_chunks)
+
+
+def iter_stream_chunks(model: TTSModel, text: str, voice: str, streaming_interval: float) -> Iterator[np.ndarray]:
+    """Yield audio chunks incrementally as the model streams them.
+
+    Unlike generate_chunks (which drains the whole utterance into a list before
+    returning), this drives the model in streaming mode and yields each chunk as
+    soon as it is decoded, so playback can start after the first chunk instead of
+    after the entire utterance. Zero-length chunks (the streaming final marker
+    when all frames were already emitted) are skipped.
+
+    Args:
+        model: Loaded TTS model.
+        text: The text to convert to speech.
+        voice: The voice to use for synthesis.
+        streaming_interval: Approximate seconds of audio per streamed chunk.
+
+    Yields:
+        Audio chunks as float32 numpy arrays.
+    """
+    for result in model.generate(text=text, voice=voice, stream=True, streaming_interval=streaming_interval):
+        chunk = np.array(result.audio, dtype=np.float32)
+        if chunk.size > 0:
+            yield chunk
 
 
 def play_audio(audio: np.ndarray, sample_rate: int) -> None:
@@ -430,6 +461,23 @@ class PlaybackJob:
     on_error: Callable[[Exception], None] | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class StreamingPlaybackJob:
+    """A streaming playback request whose chunks arrive incrementally.
+
+    The generation thread pushes chunks onto ``chunk_source`` as the model
+    produces them and pushes ``None`` to signal end of utterance; the player
+    thread writes each chunk to the warm output stream as it arrives. This
+    starts playback after the first chunk instead of buffering the whole
+    utterance first (see PlaybackJob for the buffered variant).
+    """
+
+    chunk_source: "queue.Queue[np.ndarray | None]"
+    output_path: Path | None
+    on_complete: Callable[[Path | None], None] | None = None
+    on_error: Callable[[Exception], None] | None = None
+
+
 class AudioPlayer:
     """Serial audio player that keeps one output stream warm across utterances.
 
@@ -464,13 +512,20 @@ class AudioPlayer:
 
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
-        self._jobs: queue.Queue[PlaybackJob | None] = queue.Queue()
+        self._jobs: queue.Queue[PlaybackJob | StreamingPlaybackJob | None] = queue.Queue()
         self._unhandled_errors: queue.Queue[Exception] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._closed = False
 
     def submit(self, job: PlaybackJob) -> None:
-        """Queue a playback job for serial playback."""
+        """Queue a buffered playback job for serial playback."""
+        self._enqueue(job)
+
+    def submit_stream(self, job: StreamingPlaybackJob) -> None:
+        """Queue a streaming playback job whose chunks arrive incrementally."""
+        self._enqueue(job)
+
+    def _enqueue(self, job: PlaybackJob | StreamingPlaybackJob) -> None:
         if self._closed:
             msg = "AudioPlayer is closed"
             raise RuntimeError(msg)
@@ -537,21 +592,62 @@ class AudioPlayer:
                 job.on_complete(job.output_path)
             return stream
         except Exception as exc:
-            close_error: Exception | None = None
-            try:
-                self._close_stream(stream)
-            except Exception as stream_close_error:
-                close_error = stream_close_error
-
-            playback_error = exc
-            if close_error is not None:
-                playback_error = RuntimeError(f"{exc}; additionally failed to close audio stream: {close_error}")
-
-            if job.on_error is not None:
-                job.on_error(playback_error)
-            else:
-                self._unhandled_errors.put(playback_error)
+            self._fail_playback(stream, exc, job.on_error)
             return None
+
+    def _handle_streaming_job(self, stream: AudioOutputStream | None, job: StreamingPlaybackJob) -> AudioOutputStream | None:
+        """Play one streaming job, writing chunks to the warm stream as they arrive.
+
+        Consumes chunks from job.chunk_source (fed by the generation thread) until
+        the None sentinel, so the first chunk plays without waiting for the whole
+        utterance. The queue is unbounded, so an error here never blocks the
+        producer: the generation thread's remaining put() calls just accumulate in
+        an abandoned queue that is garbage-collected.
+
+        Returns the stream to reuse for the next job, or None if it was closed due
+        to an error (the next job reopens it).
+        """
+        try:
+            stream = self._ensure_stream(stream)
+            collected: list[np.ndarray] = []
+            while True:
+                chunk = job.chunk_source.get()
+                if chunk is None:
+                    break
+                stream.write(chunk.reshape(-1, 1))
+                if job.output_path is not None:
+                    collected.append(chunk)
+            if job.output_path is not None and collected:
+                save_audio(np.concatenate(collected), job.output_path, self._sample_rate)
+            if job.on_complete is not None:
+                job.on_complete(job.output_path)
+            return stream
+        except Exception as exc:
+            self._fail_playback(stream, exc, job.on_error)
+            return None
+
+    def _fail_playback(
+        self,
+        stream: AudioOutputStream | None,
+        exc: Exception,
+        on_error: Callable[[Exception], None] | None,
+    ) -> None:
+        """Close the failed stream and report the error, so the next job reopens."""
+        close_error: Exception | None = None
+        try:
+            self._close_stream(stream)
+        except Exception as stream_close_error:
+            close_error = stream_close_error
+
+        playback_error = exc
+        if close_error is not None:
+            playback_error = RuntimeError(f"{exc}; additionally failed to close audio stream: {close_error}")
+
+        if on_error is not None:
+            on_error(playback_error)
+        else:
+            self._unhandled_errors.put(playback_error)
+        return None
 
     def _run(self) -> None:
         stream: AudioOutputStream | None = None
@@ -561,7 +657,10 @@ class AudioPlayer:
                 try:
                     if job is None:
                         break
-                    stream = self._handle_job(stream, job)
+                    if isinstance(job, StreamingPlaybackJob):
+                        stream = self._handle_streaming_job(stream, job)
+                    else:
+                        stream = self._handle_job(stream, job)
                 finally:
                     self._jobs.task_done()
         finally:
@@ -678,6 +777,45 @@ def play_chunks(chunks: list[np.ndarray], output_path: Path | None, sample_rate:
         save_audio(audio, output_path, sample_rate)
 
 
+def play_stream(
+    player: AudioPlayer,
+    chunk_iter: Iterator[np.ndarray],
+    output_path: Path | None,
+    on_complete: Callable[[Path | None], None] | None,
+    on_error: Callable[[Exception], None] | None,
+) -> None:
+    """Feed streamed generation chunks to the player as they are produced.
+
+    Runs on the generation (MLX) thread: it submits a streaming playback job,
+    then drives chunk_iter and pushes each chunk to the player's warm stream.
+    The None sentinel is always sent (even if generation raises) so the player
+    thread never blocks waiting for a chunk that will not come. Returns once
+    generation is exhausted; playback of the tail continues on the player thread
+    and completion is signalled through on_complete.
+
+    Args:
+        player: Persistent audio player.
+        chunk_iter: Iterator yielding audio chunks as they are generated.
+        output_path: Path to save the full utterance, or None to skip saving.
+        on_complete: Called with output_path when playback finishes.
+        on_error: Called if playback fails.
+    """
+    source: queue.Queue[np.ndarray | None] = queue.Queue()
+    player.submit_stream(
+        StreamingPlaybackJob(
+            chunk_source=source,
+            output_path=output_path,
+            on_complete=on_complete,
+            on_error=on_error,
+        )
+    )
+    try:
+        for chunk in chunk_iter:
+            source.put(chunk)
+    finally:
+        source.put(None)
+
+
 def _generate_worker_chunks(
     model: TTSModel,
     text: str,
@@ -728,6 +866,121 @@ def _submit_worker_playback(
     return done
 
 
+def _cli_stream_callbacks(
+    done: threading.Event,
+) -> tuple[Callable[[Path | None], None], Callable[[Exception], None]]:
+    """Build on_complete/on_error callbacks for one streamed CLI utterance.
+
+    Taking ``done`` as a parameter binds it explicitly, so the callbacks do not
+    capture a reassigned loop variable (see the per-utterance loop below).
+    """
+
+    def on_complete(_path: Path | None) -> None:
+        done.set()
+
+    def on_error(exc: Exception) -> None:
+        print(f"\n  Error: {exc}", file=sys.stderr)
+        done.set()
+
+    return on_complete, on_error
+
+
+def _run_streaming_worker(
+    work_queue: queue.Queue[str | None],
+    model: TTSModel,
+    voice: str,
+    output_path: Path | None,
+    player: AudioPlayer,
+    streaming_interval: float,
+) -> None:
+    """Process the work queue in streaming mode: play each utterance as it generates.
+
+    Each message is generated and streamed to the player chunk-by-chunk, so audio
+    starts after the first chunk rather than after the whole utterance. Messages
+    are handled serially (the within-utterance streaming is where the latency win
+    is); loudness normalization is not applied because it needs the whole signal.
+    """
+    while True:
+        text = work_queue.get()
+        if text is None:
+            break
+
+        done = threading.Event()
+        on_complete, on_error = _cli_stream_callbacks(done)
+
+        try:
+            play_stream(
+                player,
+                iter_stream_chunks(model, text, voice, streaming_interval),
+                output_path,
+                on_complete,
+                on_error,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(f"\n  Error: {exc}", file=sys.stderr)
+            done.set()
+
+        done.wait()
+        work_queue.task_done()
+
+
+def _run_buffered_worker(
+    work_queue: queue.Queue[str | None],
+    model: TTSModel,
+    voice: str,
+    output_path: Path | None,
+    player: AudioPlayer,
+    sample_rate: int,
+    normalize_audio: bool,
+    target_lufs: float,
+    true_peak_ceiling_db: float,
+    min_duration_seconds: float,
+    meter: pyln.Meter,
+) -> None:
+    """Process the work queue in buffered mode with cross-utterance lookahead.
+
+    Generates the full utterance (and optional loudness normalization) before
+    playback, generating the next message while the current one is still playing.
+    """
+    pending_chunks: list[np.ndarray] | None = None
+    playback_done: threading.Event | None = None
+
+    while True:
+        if pending_chunks is not None:
+            if playback_done is not None:
+                playback_done.wait()
+            chunks_to_play = pending_chunks
+            pending_chunks = None
+            playback_done = _submit_worker_playback(player, chunks_to_play, output_path)
+
+        text = work_queue.get()
+        if text is None:
+            if playback_done is not None:
+                playback_done.wait()
+            break
+
+        generated = _generate_worker_chunks(
+            model,
+            text,
+            voice,
+            sample_rate,
+            normalize_audio,
+            target_lufs,
+            true_peak_ceiling_db,
+            min_duration_seconds,
+            meter,
+        )
+        if generated is not None:
+            pending_chunks = generated
+        work_queue.task_done()
+
+    if pending_chunks is not None:
+        if playback_done is not None:
+            playback_done.wait()
+        playback_done = _submit_worker_playback(player, pending_chunks, output_path)
+        playback_done.wait()
+
+
 def audio_worker(
     work_queue: queue.Queue[str | None],
     model: TTSModel,
@@ -740,11 +993,15 @@ def audio_worker(
     true_peak_ceiling_db: float,
     min_duration_seconds: float,
     meter: pyln.Meter,
+    stream: bool,
+    streaming_interval: float,
 ) -> None:
     """Background worker that generates and plays TTS audio.
 
-    Generates audio for the next text while the current one is still playing,
-    so there is no gap between sentences.
+    In streaming mode (stream=True) each utterance is played chunk-by-chunk as it
+    generates, for low latency. In buffered mode it generates the full utterance
+    (with loudness normalization) before playback, generating the next message
+    while the current one plays so there is no gap between sentences.
 
     Args:
         work_queue: Queue of text strings to synthesize. None signals shutdown.
@@ -753,35 +1010,25 @@ def audio_worker(
         output_path: Path to save generated audio, or None to skip saving.
         sample_rate: Sample rate in Hz.
         lead_silence_ms: Silence written after each audio stream open/reopen.
-        normalize_audio: Whether to apply boost-only LUFS normalization.
+        normalize_audio: Whether to apply boost-only LUFS normalization (buffered mode only).
         target_lufs: Target integrated loudness in LUFS when normalization is enabled.
         true_peak_ceiling_db: Maximum true-peak level in dBFS after gain.
         min_duration_seconds: Minimum utterance length to attempt normalization.
         meter: Pre-constructed pyloudnorm Meter matching sample_rate.
+        stream: Whether to stream playback within each utterance (low latency).
+        streaming_interval: Approximate seconds of audio per streamed chunk.
     """
-    pending_chunks: list[np.ndarray] | None = None
-    playback_done: threading.Event | None = None
     player = AudioPlayer(sample_rate, lead_silence_ms)
-
     try:
-        while True:
-            if pending_chunks is not None:
-                if playback_done is not None:
-                    playback_done.wait()
-                chunks_to_play = pending_chunks
-                pending_chunks = None
-                playback_done = _submit_worker_playback(player, chunks_to_play, output_path)
-
-            text = work_queue.get()
-            if text is None:
-                if playback_done is not None:
-                    playback_done.wait()
-                break
-
-            generated = _generate_worker_chunks(
+        if stream:
+            _run_streaming_worker(work_queue, model, voice, output_path, player, streaming_interval)
+        else:
+            _run_buffered_worker(
+                work_queue,
                 model,
-                text,
                 voice,
+                output_path,
+                player,
                 sample_rate,
                 normalize_audio,
                 target_lufs,
@@ -789,15 +1036,6 @@ def audio_worker(
                 min_duration_seconds,
                 meter,
             )
-            if generated is not None:
-                pending_chunks = generated
-            work_queue.task_done()
-
-        if pending_chunks is not None:
-            if playback_done is not None:
-                playback_done.wait()
-            playback_done = _submit_worker_playback(player, pending_chunks, output_path)
-            playback_done.wait()
     finally:
         player.close()
 
@@ -814,6 +1052,8 @@ def audio_worker_from_model_id(
     true_peak_ceiling_db: float,
     min_duration_seconds: float,
     meter: pyln.Meter,
+    stream: bool,
+    streaming_interval: float,
     ready_queue: queue.Queue[BaseException | None] | None,
 ) -> None:
     """Load the model in the worker thread, then process queued TTS work.
@@ -847,6 +1087,8 @@ def audio_worker_from_model_id(
         true_peak_ceiling_db,
         min_duration_seconds,
         meter,
+        stream,
+        streaming_interval,
     )
 
 

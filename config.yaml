@@ -5,6 +5,8 @@ lead_silence_ms: 400
 default_voice: de_male
 save_wav: true
 simplify_punctuation: false
+stream: true
+streaming_interval: 1.0
 normalize_audio: true
 target_lufs: -10.0
 true_peak_ceiling_db: -1.0
