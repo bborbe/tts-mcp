@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
 
 ### Changed
 
@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `.maintainer.yaml` opting into the maintainer-bot flow (`release.autoRelease: true`, `prReviewer.autoApprove: true`), matching the `bborbe/vault-cli` setup: the `github-releaser-agent` watcher now auto-cuts releases from the `## Unreleased` block and auto-approves PRs. De-bracketed the changelog's `## [Unreleased]` → `## Unreleased` so the bot and `/coding:commit` detect the block.
 - Claude Code plugin packaging: `.claude-plugin/{plugin.json,marketplace.json}` expose this repo as an installable marketplace (`tts-mcp@tts-mcp`), and `skills/voice/SKILL.md` ships the `/voice` skill (session TTS toggle: `on` / `interview` / `off` / `status` / `restart`, plus the spoken-output playbook and TTS-server restart/troubleshooting steps) previously kept loose in `~/.claude/skills/voice`. Install with `/plugin marketplace add bborbe/tts-mcp` then `/plugin install tts-mcp@tts-mcp`.
 - GitHub Actions CI (`.github/workflows/ci.yml`) running `make precommit` on push/PR to `main`/`master`, on a macOS Apple-Silicon runner (`mlx-audio` and `sounddevice` are macOS/arm64-only and imported at module load).
 
