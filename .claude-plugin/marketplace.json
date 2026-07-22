@@ -1,0 +1,19 @@
+{
+  "name": "tts-mcp",
+  "owner": {
+    "name": "Benjamin Borbe"
+  },
+  "metadata": {
+    "description": "Local text-to-speech for Claude Code — /voice skill backed by the tts-mcp server",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "tts-mcp",
+      "description": "Local text-to-speech for Claude Code — /voice session toggle plus the spoken-output playbook",
+      "source": "./",
+      "version": "0.1.0",
+      "strict": true
+    }
+  ]
+}
