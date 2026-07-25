@@ -11,14 +11,16 @@ from pytestarch import EvaluableArchitecture, get_evaluable_architecture
 #   tests/architecture/conftest.py -> tests/ -> project root
 _TESTS_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _TESTS_DIR.parent
-_PACKAGE_DIR = _PROJECT_ROOT / "src" / "mistral_text_to_spech"
+_PACKAGE_DIR = _PROJECT_ROOT / "src"
 
 
 @pytest.fixture(scope="session")
 def evaluable() -> EvaluableArchitecture:
-    """Build the evaluable architecture graph for mistral_text_to_spech.
+    """Build the evaluable architecture graph over src/.
 
-    Uses mistral_text_to_spech package as both root and module path
-    so module names resolve cleanly (e.g. 'mistral_text_to_spech.module').
+    src/ is both root and module path so module names resolve exactly as the
+    code imports them ('src.tts', 'src.server'). Passing the project root as
+    root instead would prefix every module with the checkout's directory name,
+    which differs between clones and worktrees.
     """
     return get_evaluable_architecture(str(_PACKAGE_DIR), str(_PACKAGE_DIR))
