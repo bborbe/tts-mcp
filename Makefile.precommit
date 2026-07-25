@@ -20,9 +20,14 @@ typecheck:
 	uv run mypy src
 	uv run pyright
 
+.PHONY: mcp-typecheck
+# Type check the TypeScript MCP relay in mcp/ (npm ci installs the exact lockfile tree)
+mcp-typecheck:
+	cd mcp && npm ci && npx tsc --noEmit
+
 .PHONY: check
-# Run lint and typecheck
-check: lint typecheck
+# Run lint and typecheck (Python) plus the MCP relay typecheck
+check: lint typecheck mcp-typecheck
 
 .PHONY: test
 # Run tests with pytest (includes tests/architecture)
