@@ -30,6 +30,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # make check runs `mcp-typecheck` (npm ci + tsc) over the TypeScript MCP
+      # relay in mcp/, so the runner needs a pinned Node — without this the
+      # `test` check was blind to every change under mcp/.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install dependencies
         run: uv sync --all-extras
 

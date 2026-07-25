@@ -11,7 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `commands/voice-test.md` ships a `/tts-mcp:voice-test` slash command that speaks a test line, asks the user to confirm they heard it, and troubleshoots the audio path on failure (server reachability via `get_voices`, queue state via `get_status`, retry, restart). This is the extracted startup handshake, now invoked deliberately instead of on every activation.
 
+### Fixed
+
+- Bumped the transitive dependency tree in `mcp/` (`npm update`, lockfile-only — no `package.json` change), clearing 6 of 8 npm-audit findings: 2 high (`fast-uri`), 4 moderate (`hono`, `qs`, `ip-address`, `express-rate-limit`), 2 low (`esbuild`, `body-parser`). Verified with `npx tsc --noEmit` and an MCP `initialize` handshake against the relay. Supersedes Dependabot PRs #4–#9, which proposed the same bumps individually and would have needed six serial lockfile rebases.
+- The two remaining advisories are `@hono/node-server <2.0.5` (path traversal in `serve-static` via encoded backslash) reached through `@modelcontextprotocol/sdk >=1.25.0`. Left unfixed deliberately: `npm audit fix --force` resolves it only by downgrading the SDK to 1.24.3 (breaking), and the advisory is Windows-specific `serve-static` behaviour while this relay is macOS-only stdio-to-localhost-HTTP and serves no static files.
+
 ### Changed
+
+- `make check` now also runs `mcp-typecheck` (`npm ci && npx tsc --noEmit` in `mcp/`), and CI pins Node 22 via `actions/setup-node@v4` to support it. The required `test` status check ran `make precommit` — entirely Python (ruff/mypy/pyright/pytest) — so it was blind to every change under `mcp/`: the six Dependabot PRs touching the TypeScript relay all reported green without anything having compiled it. Verified the gate fails on a deliberate type error, not just that it passes.
 
 - `/tts-mcp:voice on` and `interview` no longer run a startup selftest — they flip the mode and report it. The handshake cost a speak-and-confirm round-trip on every activation while the channel was healthy in practice; verification moved to the dedicated `/tts-mcp:voice-test` command, which `restart` now points at.
 
