@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- `commands/voice-test.md` ships a `/tts-mcp:voice-test` slash command that speaks a test line, asks the user to confirm they heard it, and troubleshoots the audio path on failure (server reachability via `get_voices`, queue state via `get_status`, retry, restart). This is the extracted startup handshake, now invoked deliberately instead of on every activation.
+
+### Changed
+
+- `/tts-mcp:voice on` and `interview` no longer run a startup selftest — they flip the mode and report it. The handshake cost a speak-and-confirm round-trip on every activation while the channel was healthy in practice; verification moved to the dedicated `/tts-mcp:voice-test` command, which `restart` now points at.
+
 ## v0.1.0
 
 ### Changed
