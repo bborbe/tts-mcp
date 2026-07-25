@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `commands/voice-test.md` ships a `/tts-mcp:voice-test` slash command that speaks a test line, asks the user to confirm they heard it, and troubleshoots the audio path on failure (server reachability via `get_voices`, queue state via `get_status`, retry, restart). This is the extracted startup handshake, now invoked deliberately instead of on every activation.
+- `commands/voice-selfcheck.md` ships a `/tts-mcp:voice-selfcheck` slash command that speaks a test line, asks the user to confirm they heard it, and troubleshoots the audio path on failure (server reachability via `get_voices`, queue state via `get_status`, retry, restart). This is the extracted startup handshake, now invoked deliberately instead of on every activation. Named `voice-selfcheck` rather than `voice-test` because `test` is already taken twice in this repo — `make test` is pytest, and `test` is the required CI status check — so `voice-test` read like "run the repo's tests".
 
 ### Fixed
 
@@ -18,9 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bumped the plugin version to `0.2.0` in both `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`. The installed-plugin cache is keyed by that version (`~/.claude/plugins/cache/tts-mcp/tts-mcp/<version>/`), so leaving it at `0.1.0` meant `make update` kept serving the stale `0.1.0` tree — the merged `/voice` change never reached the local install, and the cached copy had no `commands/` directory at all. The release flow rewrites the CHANGELOG and tags but does not touch these two files, so the bump has to be explicit.
+
 - `make check` now also runs `mcp-typecheck` (`npm ci && npx tsc --noEmit` in `mcp/`), and CI pins Node 22 via `actions/setup-node@v4` to support it. The required `test` status check ran `make precommit` — entirely Python (ruff/mypy/pyright/pytest) — so it was blind to every change under `mcp/`: the six Dependabot PRs touching the TypeScript relay all reported green without anything having compiled it. Verified the gate fails on a deliberate type error, not just that it passes.
 
-- `/tts-mcp:voice on` and `interview` no longer run a startup selftest — they flip the mode and report it. The handshake cost a speak-and-confirm round-trip on every activation while the channel was healthy in practice; verification moved to the dedicated `/tts-mcp:voice-test` command, which `restart` now points at.
+- `/tts-mcp:voice on` and `interview` no longer run a startup selftest — they flip the mode and report it. The handshake cost a speak-and-confirm round-trip on every activation while the channel was healthy in practice; verification moved to the dedicated `/tts-mcp:voice-selfcheck` command, which `restart` now points at.
 
 ## v0.1.0
 
