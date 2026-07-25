@@ -1,6 +1,6 @@
 ---
 name: voice
-description: Manage TTS voice mode for the current session and apply the spoken-output playbook. Use when the user types /voice, asks to turn voice on/off, wants questions read aloud (interview mode), restart/fix the TTS server after audio goes silent (e.g. switching to AirPods), or asks how the voice should behave. Activation does not run a selftest — use /tts-mcp:voice-test to verify the audio path. Args: on | off | status | interview | restart.
+description: Manage TTS voice mode for the current session and apply the spoken-output playbook. Use when the user types /voice, asks to turn voice on/off, wants questions read aloud (interview mode), restart/fix the TTS server after audio goes silent (e.g. switching to AirPods), or asks how the voice should behave. Activation does not run a selftest — use /tts-mcp:voice-selfcheck to verify the audio path. Args: on | off | status | interview | restart.
 ---
 
 ## What this does
@@ -13,7 +13,7 @@ Controls whether Claude speaks via `mcp__tts__say` this session, and how. The pe
 - `interview` — stronger mode: also speak **every question that needs the user's input**, one at a time (used when the user is away from the keyboard / driving by voice).
 - `off` — disable: stop calling `mcp__tts__say` for the rest of the session. For a **permanent** disable, relax the "Voice: Attention Signals Only" line in `~/.claude/CLAUDE.md`.
 - `status` — report the current mode and voice.
-- `restart` (alias `fix`) — restart the TTS server. Use when audio goes silent after switching the Mac's output device (AirPods, headphones): the server binds the default output device once at process init, so a device switch leaves it playing into the void. Runs `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp`, waits for `/health`, then verifies via `/tts-mcp:voice-test`. See the Restart section below.
+- `restart` (alias `fix`) — restart the TTS server. Use when audio goes silent after switching the Mac's output device (AirPods, headphones): the server binds the default output device once at process init, so a device switch leaves it playing into the void. Runs `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp`, waits for `/health`, then verifies via `/tts-mcp:voice-selfcheck`. See the Restart section below.
 
 On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (casual_male)` or `🔇 voice: off`).
 
@@ -21,7 +21,7 @@ On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (ca
 
 `on` / `interview` **just flip the mode** — no test utterance, no "did you hear it?" gate. The channel is assumed healthy; in practice it is, and the handshake cost a round-trip on every activation.
 
-When you actually need proof the audio path works — silence mid-session, a device switch, or the user about to walk away and rely on voice alerts — run `/tts-mcp:voice-test`, which speaks a test line, confirms, and troubleshoots on failure.
+When you actually need proof the audio path works — silence mid-session, a device switch, or the user about to walk away and rely on voice alerts — run `/tts-mcp:voice-selfcheck`, which speaks a test line, confirms, and troubleshoots on failure.
 
 ## Restart (`restart` / `fix`)
 
@@ -29,8 +29,8 @@ Use when audio silently stops after a device switch (AirPods connect, headphones
 
 1. `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp` (KeepAlive respawns a fresh process against the current default device).
 2. Poll health until ready (model reload takes ~15–20s; `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag): `curl -s http://127.0.0.1:12000/health`.
-3. Verify: run `/tts-mcp:voice-test`.
-4. If still silent after restart, it's not the device binding — follow the troubleshooting steps in `/tts-mcp:voice-test` (server unreachable / stuck queue / synth error).
+3. Verify: run `/tts-mcp:voice-selfcheck`.
+4. If still silent after restart, it's not the device binding — follow the troubleshooting steps in `/tts-mcp:voice-selfcheck` (server unreachable / stuck queue / synth error).
 
 Caveats: in-flight messages are dropped across a restart; message IDs reset; one server serves all Claude sessions, so a restart affects every session's relay.
 
