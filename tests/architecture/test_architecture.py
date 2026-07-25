@@ -12,7 +12,7 @@ import ast
 from pathlib import Path
 
 import pytest
-from pytestarch import EvaluableArchitecture
+from pytestarch import EvaluableArchitecture, Rule
 
 pytestmark = pytest.mark.architecture
 
@@ -32,9 +32,18 @@ def _get_imports(filepath: Path) -> set[str]:
     return imports
 
 
-def test_evaluable_is_configured(evaluable: EvaluableArchitecture) -> None:
-    """Verify the evaluable architecture graph was built successfully."""
-    assert evaluable is not None
+def test_engine_does_not_import_its_consumers(
+    evaluable: EvaluableArchitecture,
+) -> None:
+    """The shared engine must not depend on the server or the CLI.
+
+    src/tts is the layer both src/server.py and src/main.py build on, so a
+    dependency in the reverse direction would make the engine unusable
+    standalone. The per-file import tests below only cover server <-> main;
+    this rule covers every module under src/tts at once, transitively.
+    """
+    rule = Rule().modules_that().are_sub_modules_of("src.tts").should_not().import_modules_that().are_named(["src.server", "src.main"])
+    rule.assert_applies(evaluable)
 
 
 def test_server_does_not_import_main() -> None:
