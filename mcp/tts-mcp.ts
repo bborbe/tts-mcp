@@ -212,12 +212,20 @@ server.tool(
         "Voice to use for synthesis. Use get_voices to list available voices.",
       ),
     text: z.string().describe("Text to convert to speech."),
+    instruct: z
+      .string()
+      .optional()
+      .describe(
+        "Optional emotion/style instruction, e.g. 'Very happy and excited.'. " +
+          "Only supported when the server runs the qwen3 engine; the voxtral " +
+          "engine rejects it.",
+      ),
   },
-  async ({ voice, text }) => {
+  async ({ voice, text, instruct }) => {
     console.error(
-      `[tts-mcp] say: voice=${voice} text="${text.slice(0, 80)}"`,
+      `[tts-mcp] say: voice=${voice} instruct=${instruct ?? "-"} text="${text.slice(0, 80)}"`,
     );
-    return request("POST", "/say", { text, voice });
+    return request("POST", "/say", { text, voice, instruct });
   },
 );
 

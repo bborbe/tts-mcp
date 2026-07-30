@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Pluggable TTS engines. A new required `engine:` key in `config.yaml` selects the model family: `voxtral` (Mistral Voxtral 4B, 20 voices, 9 languages) or `qwen3` (Qwen3-TTS CustomVoice, 9 named speakers, 10 languages, free-text emotion control). `src/tts/engine.py` holds the `TTSEngine` protocol plus `VoxtralEngine` and `Qwen3Engine`, which encapsulate the two differences between the families: how voices are discovered, and how generation is invoked (`generate(voice=…)` versus `generate_custom_voice(speaker=…, language=…, instruct=…)`). The worker, normalization, and playback layers are untouched — both families stream, so nothing below the engine seam needed to change.
+- `POST /say` and the MCP `say` tool accept an optional `instruct` field carrying a free-text emotion/style instruction (e.g. `"Very happy and excited."`). Supported by the `qwen3` engine; the `voxtral` engine fails the request rather than silently ignoring it, per the project's no-silent-fallback rule.
+- `language:` config key, required by the `qwen3` engine and rejected by `voxtral`. Qwen3 declares 10 languages plus 2 dialects in its `config.json`, including German.
+- `scripts/download-model.sh` offers the two Qwen3-TTS CustomVoice quantizations (8-bit ~3.1 GB, 4-bit ~1.8 GB) alongside the three Voxtral variants, and prints the matching `engine:` / `language:` / `default_voice:` lines to paste into `config.yaml`.
+- `tests/test_engine.py` covers engine construction and config validation, Qwen3 speaker discovery from `config.json`, per-family generation dispatch, and cross-family model rejection.
+
+### Changed
+
+- Qwen3 speakers are read from `talker_config.spk_id` in the model's `config.json` rather than from a loaded model instance. This keeps voice discovery on the same pre-load, filesystem-based path the Voxtral engine already used, so server startup ordering is unchanged (the MLX model is still loaded lazily on the audio worker thread, since MLX GPU streams are thread-local).
+- `discover_voices()` moved off `src/tts/config.py` onto the engines; `generate_chunks()`, `iter_stream_chunks()`, `streaming_chunk_iter()`, `audio_worker()`, and `audio_worker_from_model_id()` all take an engine as their first or second argument.
+- Model-capability validation moved from an inline `hasattr(model, "generate")` check in `src/server.py` and `src/tts/worker.py` to `TTSEngine.validate_model()`, so a Qwen3 model is no longer rejected for lacking a Voxtral-style `generate`.
+
+### Removed
+
+- `generate_speech(model_id, text, voice)` — an exported helper with no callers outside its own tests, which loaded a model per call and hardcoded the Voxtral call style. Removing it avoided plumbing an engine through dead code. This is a breaking change to the `src.tts` package API; the server and CLI never used it.
+
 ## v0.2.0
 
 ### Added

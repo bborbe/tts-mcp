@@ -24,10 +24,11 @@ from src.tts import (
     AudioPlayer,
     AudioSettings,
     PlaybackJob,
+    TTSEngine,
     TTSModel,
+    build_engine,
     clean_text,
     default_output_device_id,
-    discover_voices,
     generate_chunks,
     load_config,
     make_output_path,
@@ -51,6 +52,7 @@ class WorkItem:
     message_id: str
     text: str
     voice: str
+    instruct: str | None
 
 
 @dataclasses.dataclass
@@ -70,6 +72,7 @@ class ServerState:
 
     def __init__(
         self,
+        engine: TTSEngine,
         model: TTSModel | None,
         model_path: str,
         voices: list[str],
@@ -90,6 +93,7 @@ class ServerState:
         """Initialize server state.
 
         Args:
+            engine: Engine that knows how to drive the configured model family.
             model: Pre-loaded TTS model, or None to have the audio worker load
                 it on its own thread. MLX GPU streams are thread-local, so the
                 model must be loaded on the same thread that calls generate.
@@ -111,6 +115,7 @@ class ServerState:
             streaming_warmup_seconds: Seconds buffered to measure the streaming
                 normalization gain (see normalize_stream).
         """
+        self.engine = engine
         self.model: TTSModel | None = model
         self.model_path = model_path
         self.voices = voices
@@ -177,6 +182,7 @@ class SayRequest(BaseModel):
 
     text: str
     voice: str | None = None
+    instruct: str | None = None
 
 
 class SayResponse(BaseModel):
@@ -259,7 +265,7 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             completed_at=None,
         )
 
-    state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice))
+    state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct))
 
     logger.debug(
         "POST /say request:\n%s",
@@ -366,9 +372,7 @@ def _load_worker_model(state: ServerState) -> TTSModel | None:
     if model is None:
         try:
             model = load(state.model_path)
-            if not hasattr(model, "generate") or model.generate is None:
-                msg = f"Model {state.model_path} does not support generation"
-                raise RuntimeError(msg)
+            state.engine.validate_model(model, state.model_path)
             state.model = model
         except BaseException as exc:
             logger.error("Model load failed in audio worker: %s", exc)
@@ -391,7 +395,7 @@ def _generate_item(state: ServerState, model: TTSModel, item: WorkItem) -> list[
         recorded on the item's status).
     """
     try:
-        chunks = generate_chunks(model, item.text, item.voice)
+        chunks = generate_chunks(state.engine, model, item.text, item.voice, item.instruct, state.streaming_interval)
         if state.normalize_audio and chunks:
             chunks = normalize_chunks(
                 chunks,
@@ -464,7 +468,7 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
             try:
                 play_stream(
                     player,
-                    streaming_chunk_iter(model, item.text, item.voice, settings),
+                    streaming_chunk_iter(state.engine, model, item.text, item.voice, item.instruct, settings),
                     output_path,
                     on_complete,
                     on_error,
@@ -561,6 +565,8 @@ def server_audio_worker(state: ServerState) -> None:
 class _ServerConfig:
     """Parsed server configuration from config.yaml."""
 
+    engine: str
+    language: str | None
     model_path: str
     sample_rate: int
     default_voice: str
@@ -599,7 +605,19 @@ def _parse_server_config() -> _ServerConfig:
         msg = "'default_voice' in config.yaml must be a string"
         raise ValueError(msg)
 
+    engine = _require(config, "engine")
+    if not isinstance(engine, str):
+        msg = "'engine' in config.yaml must be a string"
+        raise ValueError(msg)
+
+    language = config.get("language")
+    if language is not None and not isinstance(language, str):
+        msg = "'language' in config.yaml must be a string"
+        raise ValueError(msg)
+
     return _ServerConfig(
+        engine=engine,
+        language=language,
         model_path=model_path,
         sample_rate=int(cast(int, _require(config, "sample_rate"))),
         default_voice=default_voice,
@@ -623,12 +641,14 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
     worker on its own thread (see server_audio_worker), because MLX GPU streams
     are thread-local.
     """
-    available_voices = discover_voices(Path(cfg.model_path))
+    engine = build_engine(cfg.engine, cfg.language)
+    available_voices = engine.discover_voices(Path(cfg.model_path))
     if cfg.default_voice not in available_voices:
         msg = f"default_voice '{cfg.default_voice}' not found. Available: {', '.join(available_voices)}"
         raise ValueError(msg)
 
     return ServerState(
+        engine=engine,
         model=None,
         model_path=cfg.model_path,
         voices=available_voices,

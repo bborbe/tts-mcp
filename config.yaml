@@ -1,3 +1,4 @@
+engine: voxtral
 model: ./data/models/Voxtral-4B-TTS-2603-mlx-6bit
 models_dir: ./data/models
 sample_rate: 24000

@@ -2,7 +2,7 @@
 
 ![Made with AI](https://img.shields.io/badge/Made%20with-AI-333333?labelColor=f00) ![Verified by Humans](https://img.shields.io/badge/Verified%20by-Humans-333333?labelColor=brightgreen)
 
-Local text-to-speech powered by Mistral's Voxtral model via MLX, with real-time streaming playback on Apple Silicon. Offers both an interactive CLI and a FastAPI server with an MCP bridge for AI agent integration.
+Local text-to-speech on Apple Silicon via MLX, with real-time streaming playback. Two model families are supported and selected by config: Mistral's **Voxtral 4B** and **Qwen3-TTS CustomVoice**. Offers both an interactive CLI and a FastAPI server with an MCP bridge for AI agent integration.
 
 ### Features
 
@@ -12,8 +12,10 @@ Local text-to-speech powered by Mistral's Voxtral model via MLX, with real-time 
 | Interactive CLI | Terminal interface with model/voice selection, ESC to quit, and backspace support |
 | REST API Server | FastAPI server with queued sequential playback and message status tracking |
 | MCP Server | Ready-to-use MCP bridge for Claude Code and Claude Desktop integration |
-| Multi-Voice | 20 voices across 9 languages (English, German, French, Spanish, Italian, Dutch, Portuguese, Hindi, Arabic) |
-| Multi-Model | Supports 4-bit, 6-bit, and bf16 quantization variants of Voxtral 4B |
+| Pluggable Engines | `engine: voxtral` or `engine: qwen3` in config.yaml selects the model family; both stream |
+| Multi-Voice | Voxtral: 20 voices across 9 languages. Qwen3: 9 named speakers across 10 languages |
+| Emotion Control | Qwen3 accepts a free-text `instruct` per request (e.g. "Very happy and excited.") |
+| Multi-Model | Voxtral 4B in 4-bit / 6-bit / bf16; Qwen3-TTS 1.7B CustomVoice in 4-bit / 8-bit |
 
 Under the hood, the project uses [mlx-audio](https://github.com/Blaizzy/mlx-audio) for model loading and inference on Apple Silicon, [sounddevice](https://python-sounddevice.readthedocs.io/) for real-time audio output, and [FastAPI](https://fastapi.tiangolo.com/) for the HTTP server. The MCP server is a lightweight TypeScript relay using the [Model Context Protocol SDK](https://modelcontextprotocol.io/).
 
@@ -86,8 +88,18 @@ There are two independent entry paths into the system. The interactive CLI (`src
 ├── src/                    # Application source code
 │   ├── main.py             # CLI frontend
 │   ├── server.py           # FastAPI TTS server
-│   └── tts.py              # Shared TTS engine (config, generation, playback)
+│   └── tts/                # Shared TTS engine package
+│       ├── config.py       # Config resolution, model discovery, output paths
+│       ├── device.py       # CoreAudio default-device watcher
+│       ├── engine.py       # Pluggable engines (voxtral / qwen3)
+│       ├── generate.py     # Buffered + streaming chunk generation
+│       ├── normalize.py    # BS.1770-4 loudness normalization
+│       ├── player.py       # Serial audio playback + WAV writing
+│       ├── protocols.py    # Typing protocols for models and streams
+│       ├── text.py         # Text cleaning / punctuation simplification
+│       └── worker.py       # Background generation-and-playback loops
 ├── tests/                  # Unit tests
+│   ├── test_engine.py
 │   ├── test_main.py
 │   ├── test_server.py
 │   ├── test_tts.py
@@ -147,6 +159,7 @@ Configuration lives in a `config.yaml` file, resolved in this precedence order:
 Keeping machine-local config at `~/.config/tts-mcp/config.yaml` keeps it out of the repo working tree. Both the Python server/CLI and the TypeScript MCP relay use the same order. Note: `model:`, `models_dir:`, and data paths inside the file are resolved relative to the **process working directory**, not the config file's location. Example: 
 
 ```yaml
+engine: voxtral
 model: /path/to/Voxtral-4B-TTS-2603-mlx-6bit
 models_dir: /path/to/models
 sample_rate: 24000
@@ -166,6 +179,8 @@ port: 12000
 
 | Key | Description |
 |-----|-------------|
+| `engine` | **Required.** Model family: `voxtral` or `qwen3`. No default — a missing value is an error |
+| `language` | Required by `qwen3` (e.g. `English`, `German`); rejected by `voxtral` |
 | `model` | Path to the downloaded MLX model directory |
 | `models_dir` | Base directory containing model subdirectories (for CLI model selection) |
 | `sample_rate` | Audio sample rate in Hz (24000 for Voxtral) |
@@ -250,9 +265,12 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
 ```json
 {
   "text": "Hello, this is a test.",
-  "voice": "casual_female"
+  "voice": "casual_female",
+  "instruct": "Very happy and excited."
 }
 ```
+
+`instruct` is optional and only accepted by the `qwen3` engine; the `voxtral` engine fails the request rather than ignoring it.
 
 Returns `202 Accepted` with a message ID and queue position. Audio plays through the server's speakers.
 
@@ -266,7 +284,7 @@ The MCP server (`mcp/tts-mcp.ts`) is a transparent relay between MCP clients and
 
 | Tool | Description |
 |------|-------------|
-| `say` | Queue text for speech synthesis with a specified voice |
+| `say` | Queue text for speech synthesis with a specified voice (optional `instruct` on qwen3) |
 | `get_voices` | List all available voices |
 | `get_status` | Check status of a speech request by message ID |
 

@@ -22,6 +22,7 @@ def _base_cli_config() -> dict[str, object]:
         "true_peak_ceiling_db": -1.0,
         "min_duration_seconds": 0.5,
         "lead_silence_ms": 200,
+        "engine": "voxtral",
         "stream": False,
         "streaming_interval": 1.0,
         "streaming_warmup_seconds": 2.0,
