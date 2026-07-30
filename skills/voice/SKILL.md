@@ -5,7 +5,7 @@ description: Manage TTS voice mode for the current session and apply the spoken-
 
 ## What this does
 
-Controls whether Claude speaks via `mcp__tts__say` this session, and how. The persistent default lives in `~/.claude/CLAUDE.md` ("Voice: Attention Signals Only … casual_male"); this skill is the **session-scoped** toggle plus the speaking playbook. A skill cannot force behavior across turns on its own — it sets the mode for the rest of this session and reminds Claude of the rules.
+Controls whether Claude speaks via `mcp__tts__say` this session, and how. The persistent default lives in `~/.claude/CLAUDE.md` ("Voice Attention Only … `ryan`"); this skill is the **session-scoped** toggle plus the speaking playbook. A skill cannot force behavior across turns on its own — it sets the mode for the rest of this session and reminds Claude of the rules.
 
 ## Args
 
@@ -15,7 +15,7 @@ Controls whether Claude speaks via `mcp__tts__say` this session, and how. The pe
 - `status` — report the current mode and voice.
 - `restart` (alias `fix`) — restart the TTS server. Use when audio goes silent after switching the Mac's output device (AirPods, headphones): the server binds the default output device once at process init, so a device switch leaves it playing into the void. Runs `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp`, waits for `/health`, then verifies via `/tts-mcp:voice-selfcheck`. See the Restart section below.
 
-On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (casual_male)` or `🔇 voice: off`).
+On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (ryan)` or `🔇 voice: off`).
 
 ## No selftest on activation
 
@@ -38,7 +38,7 @@ Caveats: in-flight messages are dropped across a restart; message IDs reset; one
 
 Speech is a different channel from the terminal text. When you call `mcp__tts__say`:
 
-- **Voice `casual_male`, always.**
+- **Voice `ryan`, always.** (`ryan` is a Qwen3-TTS CustomVoice speaker. If the server runs `engine: voxtral`, its voices are Voxtral names such as `casual_male` instead — check `get_voices` when a voice is rejected.)
 - **Lead with a throwaway word.** CoreAudio clips the first ~word of each utterance. Start every spoken message with a disposable lead token — `"Okay."`, `"So,"`, `"Right,"` — so the clip eats that, not the real first word. Never let a content word be first.
 - **Terse.** One idea per sentence. This is a nudge to attention, not a recital of the on-screen text — never read a whole reply aloud.
 - **No markup in speech.** No markdown, URLs, file paths, code, or backticks — describe them in words ("the controller Makefile", not "`Makefile.k8s`").

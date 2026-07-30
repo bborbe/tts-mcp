@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Qwen3 speakers are read from `talker_config.spk_id` in the model's `config.json` rather than from a loaded model instance. This keeps voice discovery on the same pre-load, filesystem-based path the Voxtral engine already used, so server startup ordering is unchanged (the MLX model is still loaded lazily on the audio worker thread, since MLX GPU streams are thread-local).
 - `discover_voices()` moved off `src/tts/config.py` onto the engines; `generate_chunks()`, `iter_stream_chunks()`, `streaming_chunk_iter()`, `audio_worker()`, and `audio_worker_from_model_id()` all take an engine as their first or second argument.
 - Model-capability validation moved from an inline `hasattr(model, "generate")` check in `src/server.py` and `src/tts/worker.py` to `TTSEngine.validate_model()`, so a Qwen3 model is no longer rejected for lacking a Voxtral-style `generate`.
+- The `/voice` skill and `/tts-mcp:voice-selfcheck` command now name `ryan` (a Qwen3-TTS CustomVoice speaker) as the standing voice instead of `casual_male` (Voxtral). Voice names are engine-specific, so a Voxtral name is rejected with HTTP 400 once the server runs `engine: qwen3`; both docs now point at `get_voices` when a voice is refused.
 
 ### Removed
 
