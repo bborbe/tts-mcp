@@ -115,43 +115,128 @@ class ServerState:
             streaming_warmup_seconds: Seconds buffered to measure the streaming
                 normalization gain (see normalize_stream).
         """
-        self.engine = engine
+        self._engine = engine
         self.model: TTSModel | None = model
-        self.model_path = model_path
-        self.voices = voices
-        self.default_voice = default_voice
-        self.sample_rate = sample_rate
-        self.lead_silence_ms = lead_silence_ms
-        self.simplify_punctuation = simplify_punctuation
-        self.save_wav = save_wav
-        self.normalize_audio = normalize_audio
-        self.target_lufs = target_lufs
-        self.true_peak_ceiling_db = true_peak_ceiling_db
-        self.min_duration_seconds = min_duration_seconds
-        self.meter = meter
-        self.stream = stream
-        self.streaming_interval = streaming_interval
-        self.streaming_warmup_seconds = streaming_warmup_seconds
+        self._model_path = model_path
+        self._voices = voices
+        self._default_voice = default_voice
+        self._sample_rate = sample_rate
+        self._lead_silence_ms = lead_silence_ms
+        self._simplify_punctuation = simplify_punctuation
+        self._save_wav = save_wav
+        self._normalize_audio = normalize_audio
+        self._target_lufs = target_lufs
+        self._true_peak_ceiling_db = true_peak_ceiling_db
+        self._min_duration_seconds = min_duration_seconds
+        self._meter = meter
+        self._stream = stream
+        self._streaming_interval = streaming_interval
+        self._streaming_warmup_seconds = streaming_warmup_seconds
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
-        self.status_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self._counter = 0
         self._counter_lock = threading.Lock()
+
+    @property
+    def engine(self) -> TTSEngine:
+        """Engine that knows how to drive the configured model family."""
+        return self._engine
+
+    @property
+    def model_path(self) -> str:
+        """Filesystem path to the model, loaded by the audio worker."""
+        return self._model_path
+
+    @property
+    def voices(self) -> list[str]:
+        """Available voice names."""
+        return self._voices
+
+    @property
+    def default_voice(self) -> str:
+        """Default voice for requests without a voice override."""
+        return self._default_voice
+
+    @property
+    def sample_rate(self) -> int:
+        """Audio sample rate in Hz."""
+        return self._sample_rate
+
+    @property
+    def lead_silence_ms(self) -> int:
+        """Silence written after each audio stream open/reopen."""
+        return self._lead_silence_ms
+
+    @property
+    def simplify_punctuation(self) -> bool:
+        """Whether to simplify punctuation before TTS."""
+        return self._simplify_punctuation
+
+    @property
+    def save_wav(self) -> bool:
+        """Whether to save generated audio to WAV files."""
+        return self._save_wav
+
+    @property
+    def normalize_audio(self) -> bool:
+        """Whether to apply utterance-level loudness normalization."""
+        return self._normalize_audio
+
+    @property
+    def target_lufs(self) -> float:
+        """Target integrated loudness in LUFS."""
+        return self._target_lufs
+
+    @property
+    def true_peak_ceiling_db(self) -> float:
+        """Maximum true-peak level in dBFS after gain."""
+        return self._true_peak_ceiling_db
+
+    @property
+    def min_duration_seconds(self) -> float:
+        """Minimum utterance length to attempt normalization."""
+        return self._min_duration_seconds
+
+    @property
+    def meter(self) -> pyln.Meter:
+        """Pre-constructed pyloudnorm Meter matching sample_rate."""
+        return self._meter
+
+    @property
+    def stream(self) -> bool:
+        """Whether to stream playback within each utterance."""
+        return self._stream
+
+    @property
+    def streaming_interval(self) -> float:
+        """Approximate seconds of audio per streamed chunk."""
+        return self._streaming_interval
+
+    @property
+    def streaming_warmup_seconds(self) -> float:
+        """Seconds buffered to measure the streaming gain."""
+        return self._streaming_warmup_seconds
+
+    @property
+    def status_lock(self) -> threading.Lock:
+        """Guards the statuses dict."""
+        return self._status_lock
 
     def audio_settings(self) -> AudioSettings:
         """Build the worker AudioSettings from this state's fields."""
         return AudioSettings(
-            sample_rate=self.sample_rate,
-            lead_silence_ms=self.lead_silence_ms,
-            normalize_audio=self.normalize_audio,
-            target_lufs=self.target_lufs,
-            true_peak_ceiling_db=self.true_peak_ceiling_db,
-            min_duration_seconds=self.min_duration_seconds,
-            meter=self.meter,
-            stream=self.stream,
-            streaming_interval=self.streaming_interval,
-            streaming_warmup_seconds=self.streaming_warmup_seconds,
+            sample_rate=self._sample_rate,
+            lead_silence_ms=self._lead_silence_ms,
+            normalize_audio=self._normalize_audio,
+            target_lufs=self._target_lufs,
+            true_peak_ceiling_db=self._true_peak_ceiling_db,
+            min_duration_seconds=self._min_duration_seconds,
+            meter=self._meter,
+            stream=self._stream,
+            streaming_interval=self._streaming_interval,
+            streaming_warmup_seconds=self._streaming_warmup_seconds,
         )
 
     def next_message_id(self) -> str:
@@ -169,7 +254,7 @@ class ServerState:
     def evict_expired(self) -> None:
         """Remove completed/errored status entries older than TTL."""
         now = time.time()
-        with self.status_lock:
+        with self._status_lock:
             expired = [
                 mid for mid, ms in self.statuses.items() if ms.completed_at is not None and (now - ms.completed_at) > STATUS_TTL_SECONDS
             ]
@@ -199,8 +284,8 @@ class StatusResponse(BaseModel):
     message_id: str
     status: str
     text: str
-    audio_file: str | None
-    error: str | None
+    audio_file: str | None = None
+    error: str | None = None
 
 
 class VoicesResponse(BaseModel):

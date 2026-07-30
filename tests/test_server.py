@@ -89,8 +89,8 @@ class _ImmediateAudioPlayer:
     max_active_count = 0
 
     def __init__(self, sample_rate: int, lead_silence_ms: int) -> None:
-        self.sample_rate = sample_rate
-        self.lead_silence_ms = lead_silence_ms
+        self._sample_rate = sample_rate
+        self._lead_silence_ms = lead_silence_ms
 
     def submit(self, job: Any) -> None:
         _ImmediateAudioPlayer.active_count += 1
