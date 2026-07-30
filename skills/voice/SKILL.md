@@ -28,7 +28,7 @@ When you actually need proof the audio path works — silence mid-session, a dev
 Use when audio silently stops after a device switch (AirPods connect, headphones unplug). The server is a launchd-supervised FastAPI process (`com.bborbe.tts-mcp`) that binds the default output device at init; a switch orphans it.
 
 1. `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp` (KeepAlive respawns a fresh process against the current default device).
-2. Poll health until ready (model reload takes ~15–20s; `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag): `curl -s http://127.0.0.1:12000/health`.
+2. Poll health until ready — `curl -s http://127.0.0.1:12000/health`. `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag. Model reload is ~1-3s on `engine: qwen3`, ~15-20s on `engine: voxtral`.
 3. Verify: run `/tts-mcp:voice-selfcheck`.
 4. If still silent after restart, it's not the device binding — follow the troubleshooting steps in `/tts-mcp:voice-selfcheck` (server unreachable / stuck queue / synth error).
 
