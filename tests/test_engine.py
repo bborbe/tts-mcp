@@ -4,9 +4,20 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
+import pyloudnorm as pyln
 import pytest
 
-from src.tts import QWEN3, VOXTRAL, Qwen3Engine, VoxtralEngine, build_engine
+from src.tts import (
+    QWEN3,
+    VOXTRAL,
+    AudioSettings,
+    Qwen3Engine,
+    VoxtralEngine,
+    build_engine,
+    iter_stream_chunks,
+    streaming_chunk_iter,
+)
 
 
 def _write_qwen3_config(model_dir: Path, spk_id: dict[str, int] | None) -> None:
@@ -99,6 +110,72 @@ class TestGenerateDispatch:
             stream=True,
             streaming_interval=1.5,
         )
+
+
+class TestStreamingPathWiring:
+    """Tests that the streaming helpers drive engine.generate with stream=True.
+
+    Covers the iter_stream_chunks -> engine.generate wiring and the
+    streaming_chunk_iter -> iter_stream_chunks hand-off, which the engine
+    dispatch tests above exercise only at the engine boundary.
+    """
+
+    def test_iter_stream_chunks_requests_streaming_from_voxtral(self) -> None:
+        model = MagicMock()
+        model.generate.return_value = [
+            MagicMock(audio=np.ones(100, dtype=np.float32)),
+            MagicMock(audio=np.zeros(0, dtype=np.float32)),
+            MagicMock(audio=np.ones(50, dtype=np.float32)),
+        ]
+
+        chunks = list(iter_stream_chunks(VoxtralEngine(), model, "hello", "casual_male", None, 1.5))
+
+        model.generate.assert_called_once_with(text="hello", voice="casual_male", stream=True, streaming_interval=1.5)
+        assert [len(c) for c in chunks] == [100, 50]
+
+    def test_iter_stream_chunks_requests_streaming_from_qwen3_with_instruct(self) -> None:
+        model = MagicMock()
+        model.generate_custom_voice.return_value = [MagicMock(audio=np.ones(80, dtype=np.float32))]
+
+        chunks = list(iter_stream_chunks(Qwen3Engine("English"), model, "hi", "ryan", "Very happy.", 2.0))
+
+        model.generate_custom_voice.assert_called_once_with(
+            text="hi",
+            speaker="ryan",
+            language="English",
+            instruct="Very happy.",
+            stream=True,
+            streaming_interval=2.0,
+        )
+        assert [len(c) for c in chunks] == [80]
+
+    def test_streaming_chunk_iter_passes_instruct_through_to_model(self) -> None:
+        model = MagicMock()
+        model.generate_custom_voice.return_value = [MagicMock(audio=np.ones(120, dtype=np.float32))]
+        settings = AudioSettings(
+            sample_rate=24000,
+            lead_silence_ms=0,
+            normalize_audio=False,
+            target_lufs=-20.0,
+            true_peak_ceiling_db=-1.0,
+            min_duration_seconds=0.5,
+            meter=pyln.Meter(24000.0),
+            stream=True,
+            streaming_interval=1.0,
+            streaming_warmup_seconds=2.0,
+        )
+
+        chunks = list(streaming_chunk_iter(Qwen3Engine("German"), model, "hallo", "eric", "Calm.", settings))
+
+        model.generate_custom_voice.assert_called_once_with(
+            text="hallo",
+            speaker="eric",
+            language="German",
+            instruct="Calm.",
+            stream=True,
+            streaming_interval=1.0,
+        )
+        assert [len(c) for c in chunks] == [120]
 
 
 class TestValidateModel:
