@@ -91,31 +91,6 @@ def discover_models(models_dir: Path) -> list[Path]:
     return models
 
 
-def discover_voices(model_dir: Path) -> list[str]:
-    """Discover available voices from the model's voice_embedding directory.
-
-    Args:
-        model_dir: Path to the model directory.
-
-    Returns:
-        Sorted list of available voice names.
-
-    Raises:
-        FileNotFoundError: If voice_embedding directory does not exist or has no voices.
-    """
-    voice_dir = model_dir / "voice_embedding"
-    if not voice_dir.exists():
-        msg = f"No voice_embedding directory found in {model_dir}"
-        raise FileNotFoundError(msg)
-
-    voices = sorted(p.stem for p in voice_dir.glob("*.safetensors"))
-    if not voices:
-        msg = f"No voice files found in {voice_dir}"
-        raise FileNotFoundError(msg)
-
-    return voices
-
-
 def make_output_path(output_dir: Path) -> Path:
     """Generate a timestamped output path for a new audio file.
 

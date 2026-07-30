@@ -20,7 +20,7 @@ from src.server import (
     router,
     server_audio_worker,
 )
-from src.tts import AudioPlayer
+from src.tts import AudioPlayer, VoxtralEngine
 
 
 def _make_state(
@@ -53,6 +53,7 @@ def _make_state(
     if meter is None:
         meter = pyln.Meter(float(sample_rate))
     return ServerState(
+        engine=VoxtralEngine(),
         model=model,
         model_path=model_path,
         voices=voices,
@@ -88,8 +89,8 @@ class _ImmediateAudioPlayer:
     max_active_count = 0
 
     def __init__(self, sample_rate: int, lead_silence_ms: int) -> None:
-        self.sample_rate = sample_rate
-        self.lead_silence_ms = lead_silence_ms
+        self._sample_rate = sample_rate
+        self._lead_silence_ms = lead_silence_ms
 
     def submit(self, job: Any) -> None:
         _ImmediateAudioPlayer.active_count += 1
@@ -513,7 +514,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -542,7 +543,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -577,7 +578,7 @@ class TestServerAudioWorker:
                     error=None,
                     completed_at=None,
                 )
-            state.work_queue.put(WorkItem(message_id=msg_id, text=f"Message {i}", voice="casual_female"))
+            state.work_queue.put(WorkItem(message_id=msg_id, text=f"Message {i}", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -605,7 +606,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Fail", voice="casual_female"))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Fail", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -649,7 +650,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -694,7 +695,7 @@ class TestServerAudioWorker:
                     error=None,
                     completed_at=None,
                 )
-            state.work_queue.put(WorkItem(message_id=message_id, text=text, voice="casual_female"))
+            state.work_queue.put(WorkItem(message_id=message_id, text=text, voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -756,7 +757,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -825,7 +826,7 @@ class TestSaveWavDisabled:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female"))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))

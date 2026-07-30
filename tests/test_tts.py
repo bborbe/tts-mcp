@@ -17,14 +17,13 @@ from src.tts import (
     AudioSettings,
     PlaybackJob,
     StreamingPlaybackJob,
+    VoxtralEngine,
     audio_worker,
     boost_gain,
     clean_text,
     config_env_var,
     discover_models,
-    discover_voices,
     generate_chunks,
-    generate_speech,
     iter_stream_chunks,
     load_config,
     make_output_path,
@@ -74,9 +73,9 @@ def _worker_args(
     model: MagicMock,
     voice: str,
     output_path: Path | None,
-) -> tuple[queue.Queue[str | None], MagicMock, str, Path | None, AudioSettings]:
+) -> tuple[queue.Queue[str | None], VoxtralEngine, MagicMock, str, Path | None, AudioSettings]:
     """Build the positional args tuple for audio_worker (buffered mode, normalization disabled)."""
-    return (work_queue, model, voice, output_path, _audio_settings())
+    return (work_queue, VoxtralEngine(), model, voice, output_path, _audio_settings())
 
 
 def _make_sine(duration_s: float, freq_hz: float, amplitude: float, sample_rate: int = _SR) -> np.ndarray:
@@ -164,8 +163,8 @@ class TestDiscoverModels:
             pass
 
 
-class TestDiscoverVoices:
-    """Tests for the discover_voices function."""
+class TestVoxtralEngineDiscoverVoices:
+    """Tests for VoxtralEngine.discover_voices."""
 
     def test_discovers_voices(self, tmp_path: Path) -> None:
         voice_dir = tmp_path / "voice_embedding"
@@ -173,12 +172,12 @@ class TestDiscoverVoices:
         (voice_dir / "casual_male.safetensors").write_bytes(b"fake")
         (voice_dir / "neutral_female.safetensors").write_bytes(b"fake")
 
-        voices = discover_voices(tmp_path)
+        voices = VoxtralEngine().discover_voices(tmp_path)
         assert voices == ["casual_male", "neutral_female"]
 
     def test_raises_if_no_voice_dir(self, tmp_path: Path) -> None:
         try:
-            discover_voices(tmp_path)
+            VoxtralEngine().discover_voices(tmp_path)
             raise AssertionError("Expected FileNotFoundError")
         except FileNotFoundError:
             pass
@@ -186,54 +185,10 @@ class TestDiscoverVoices:
     def test_raises_if_no_voices(self, tmp_path: Path) -> None:
         (tmp_path / "voice_embedding").mkdir()
         try:
-            discover_voices(tmp_path)
+            VoxtralEngine().discover_voices(tmp_path)
             raise AssertionError("Expected FileNotFoundError")
         except FileNotFoundError:
             pass
-
-
-class TestGenerateSpeech:
-    """Tests for the generate_speech function."""
-
-    @patch("src.tts.generate.load")
-    def test_generates_audio_from_text(self, mock_load: MagicMock) -> None:
-        mock_model = MagicMock()
-        mock_result = MagicMock()
-        mock_result.audio = np.ones(1000, dtype=np.float32)
-        mock_model.generate.return_value = [mock_result]
-        mock_load.return_value = mock_model
-
-        audio = generate_speech(model_id="test-model", text="Hello", voice="casual_male")
-
-        assert len(audio) == 1000
-        mock_load.assert_called_once_with("test-model")
-        mock_model.generate.assert_called_once_with(text="Hello", voice="casual_male")
-
-    @patch("src.tts.generate.load")
-    def test_concatenates_multiple_chunks(self, mock_load: MagicMock) -> None:
-        mock_model = MagicMock()
-        chunk1 = MagicMock()
-        chunk1.audio = np.ones(500, dtype=np.float32)
-        chunk2 = MagicMock()
-        chunk2.audio = np.ones(300, dtype=np.float32)
-        mock_model.generate.return_value = [chunk1, chunk2]
-        mock_load.return_value = mock_model
-
-        audio = generate_speech(model_id="m", text="test", voice="neutral_male")
-
-        assert len(audio) == 800
-
-    @patch("src.tts.generate.load")
-    def test_raises_if_no_audio_generated(self, mock_load: MagicMock) -> None:
-        mock_model = MagicMock()
-        mock_model.generate.return_value = []
-        mock_load.return_value = mock_model
-
-        try:
-            generate_speech(model_id="m", text="test", voice="casual_male")
-            raise AssertionError("Expected RuntimeError")
-        except RuntimeError as exc:
-            assert "No audio was generated" in str(exc)
 
 
 class TestPlayAudio:
@@ -281,7 +236,7 @@ class TestGenerateChunks:
         chunk.audio = np.ones(500, dtype=np.float32)
         mock_model.generate.return_value = [chunk]
 
-        result = generate_chunks(mock_model, "hello", "casual_female")
+        result = generate_chunks(VoxtralEngine(), mock_model, "hello", "casual_female", None, 1.0)
 
         assert len(result) == 1
         assert isinstance(result[0], np.ndarray)
@@ -291,7 +246,7 @@ class TestGenerateChunks:
         mock_model = MagicMock()
         mock_model.generate.return_value = []
 
-        result = generate_chunks(mock_model, "hello", "casual_female")
+        result = generate_chunks(VoxtralEngine(), mock_model, "hello", "casual_female", None, 1.0)
 
         assert result == []
 
@@ -299,7 +254,7 @@ class TestGenerateChunks:
         mock_model = MagicMock()
         mock_model.generate.return_value = []
 
-        generate_chunks(mock_model, "test text", "neutral_male")
+        generate_chunks(VoxtralEngine(), mock_model, "test text", "neutral_male", None, 1.0)
 
         mock_model.generate.assert_called_once_with(text="test text", voice="neutral_male")
 
@@ -313,7 +268,7 @@ class TestIterStreamChunks:
         c2 = MagicMock(audio=np.ones(200, dtype=np.float32))
         mock_model.generate.return_value = [c1, c2]
 
-        result = list(iter_stream_chunks(mock_model, "hello", "casual_female", 1.5))
+        result = list(iter_stream_chunks(VoxtralEngine(), mock_model, "hello", "casual_female", None, 1.5))
 
         assert [len(c) for c in result] == [100, 200]
         assert all(c.dtype == np.float32 for c in result)
@@ -325,7 +280,7 @@ class TestIterStreamChunks:
         empty = MagicMock(audio=np.zeros(0, dtype=np.float32))
         mock_model.generate.return_value = [c1, empty]
 
-        result = list(iter_stream_chunks(mock_model, "hello", "de_male", 1.0))
+        result = list(iter_stream_chunks(VoxtralEngine(), mock_model, "hello", "de_male", None, 1.0))
 
         assert len(result) == 1
         assert len(result[0]) == 100
@@ -761,7 +716,14 @@ class TestAudioWorker:
         work_queue.put("hello world")
         work_queue.put(None)
 
-        args = (work_queue, mock_model, "casual_female", tmp_path / "out.wav", _audio_settings(stream=True))
+        args = (
+            work_queue,
+            VoxtralEngine(),
+            mock_model,
+            "casual_female",
+            tmp_path / "out.wav",
+            _audio_settings(stream=True),
+        )
         t = threading.Thread(target=audio_worker, args=args)
         t.start()
         t.join(timeout=5)

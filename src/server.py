@@ -24,10 +24,11 @@ from src.tts import (
     AudioPlayer,
     AudioSettings,
     PlaybackJob,
+    TTSEngine,
     TTSModel,
+    build_engine,
     clean_text,
     default_output_device_id,
-    discover_voices,
     generate_chunks,
     load_config,
     make_output_path,
@@ -51,6 +52,7 @@ class WorkItem:
     message_id: str
     text: str
     voice: str
+    instruct: str | None
 
 
 @dataclasses.dataclass
@@ -70,6 +72,7 @@ class ServerState:
 
     def __init__(
         self,
+        engine: TTSEngine,
         model: TTSModel | None,
         model_path: str,
         voices: list[str],
@@ -90,6 +93,7 @@ class ServerState:
         """Initialize server state.
 
         Args:
+            engine: Engine that knows how to drive the configured model family.
             model: Pre-loaded TTS model, or None to have the audio worker load
                 it on its own thread. MLX GPU streams are thread-local, so the
                 model must be loaded on the same thread that calls generate.
@@ -111,42 +115,128 @@ class ServerState:
             streaming_warmup_seconds: Seconds buffered to measure the streaming
                 normalization gain (see normalize_stream).
         """
+        self._engine = engine
         self.model: TTSModel | None = model
-        self.model_path = model_path
-        self.voices = voices
-        self.default_voice = default_voice
-        self.sample_rate = sample_rate
-        self.lead_silence_ms = lead_silence_ms
-        self.simplify_punctuation = simplify_punctuation
-        self.save_wav = save_wav
-        self.normalize_audio = normalize_audio
-        self.target_lufs = target_lufs
-        self.true_peak_ceiling_db = true_peak_ceiling_db
-        self.min_duration_seconds = min_duration_seconds
-        self.meter = meter
-        self.stream = stream
-        self.streaming_interval = streaming_interval
-        self.streaming_warmup_seconds = streaming_warmup_seconds
+        self._model_path = model_path
+        self._voices = voices
+        self._default_voice = default_voice
+        self._sample_rate = sample_rate
+        self._lead_silence_ms = lead_silence_ms
+        self._simplify_punctuation = simplify_punctuation
+        self._save_wav = save_wav
+        self._normalize_audio = normalize_audio
+        self._target_lufs = target_lufs
+        self._true_peak_ceiling_db = true_peak_ceiling_db
+        self._min_duration_seconds = min_duration_seconds
+        self._meter = meter
+        self._stream = stream
+        self._streaming_interval = streaming_interval
+        self._streaming_warmup_seconds = streaming_warmup_seconds
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
-        self.status_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self._counter = 0
         self._counter_lock = threading.Lock()
+
+    @property
+    def engine(self) -> TTSEngine:
+        """Engine that knows how to drive the configured model family."""
+        return self._engine
+
+    @property
+    def model_path(self) -> str:
+        """Filesystem path to the model, loaded by the audio worker."""
+        return self._model_path
+
+    @property
+    def voices(self) -> list[str]:
+        """Available voice names."""
+        return self._voices
+
+    @property
+    def default_voice(self) -> str:
+        """Default voice for requests without a voice override."""
+        return self._default_voice
+
+    @property
+    def sample_rate(self) -> int:
+        """Audio sample rate in Hz."""
+        return self._sample_rate
+
+    @property
+    def lead_silence_ms(self) -> int:
+        """Silence written after each audio stream open/reopen."""
+        return self._lead_silence_ms
+
+    @property
+    def simplify_punctuation(self) -> bool:
+        """Whether to simplify punctuation before TTS."""
+        return self._simplify_punctuation
+
+    @property
+    def save_wav(self) -> bool:
+        """Whether to save generated audio to WAV files."""
+        return self._save_wav
+
+    @property
+    def normalize_audio(self) -> bool:
+        """Whether to apply utterance-level loudness normalization."""
+        return self._normalize_audio
+
+    @property
+    def target_lufs(self) -> float:
+        """Target integrated loudness in LUFS."""
+        return self._target_lufs
+
+    @property
+    def true_peak_ceiling_db(self) -> float:
+        """Maximum true-peak level in dBFS after gain."""
+        return self._true_peak_ceiling_db
+
+    @property
+    def min_duration_seconds(self) -> float:
+        """Minimum utterance length to attempt normalization."""
+        return self._min_duration_seconds
+
+    @property
+    def meter(self) -> pyln.Meter:
+        """Pre-constructed pyloudnorm Meter matching sample_rate."""
+        return self._meter
+
+    @property
+    def stream(self) -> bool:
+        """Whether to stream playback within each utterance."""
+        return self._stream
+
+    @property
+    def streaming_interval(self) -> float:
+        """Approximate seconds of audio per streamed chunk."""
+        return self._streaming_interval
+
+    @property
+    def streaming_warmup_seconds(self) -> float:
+        """Seconds buffered to measure the streaming gain."""
+        return self._streaming_warmup_seconds
+
+    @property
+    def status_lock(self) -> threading.Lock:
+        """Guards the statuses dict."""
+        return self._status_lock
 
     def audio_settings(self) -> AudioSettings:
         """Build the worker AudioSettings from this state's fields."""
         return AudioSettings(
-            sample_rate=self.sample_rate,
-            lead_silence_ms=self.lead_silence_ms,
-            normalize_audio=self.normalize_audio,
-            target_lufs=self.target_lufs,
-            true_peak_ceiling_db=self.true_peak_ceiling_db,
-            min_duration_seconds=self.min_duration_seconds,
-            meter=self.meter,
-            stream=self.stream,
-            streaming_interval=self.streaming_interval,
-            streaming_warmup_seconds=self.streaming_warmup_seconds,
+            sample_rate=self._sample_rate,
+            lead_silence_ms=self._lead_silence_ms,
+            normalize_audio=self._normalize_audio,
+            target_lufs=self._target_lufs,
+            true_peak_ceiling_db=self._true_peak_ceiling_db,
+            min_duration_seconds=self._min_duration_seconds,
+            meter=self._meter,
+            stream=self._stream,
+            streaming_interval=self._streaming_interval,
+            streaming_warmup_seconds=self._streaming_warmup_seconds,
         )
 
     def next_message_id(self) -> str:
@@ -164,7 +254,7 @@ class ServerState:
     def evict_expired(self) -> None:
         """Remove completed/errored status entries older than TTL."""
         now = time.time()
-        with self.status_lock:
+        with self._status_lock:
             expired = [
                 mid for mid, ms in self.statuses.items() if ms.completed_at is not None and (now - ms.completed_at) > STATUS_TTL_SECONDS
             ]
@@ -177,6 +267,7 @@ class SayRequest(BaseModel):
 
     text: str
     voice: str | None = None
+    instruct: str | None = None
 
 
 class SayResponse(BaseModel):
@@ -193,8 +284,8 @@ class StatusResponse(BaseModel):
     message_id: str
     status: str
     text: str
-    audio_file: str | None
-    error: str | None
+    audio_file: str | None = None
+    error: str | None = None
 
 
 class VoicesResponse(BaseModel):
@@ -259,7 +350,7 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             completed_at=None,
         )
 
-    state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice))
+    state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct))
 
     logger.debug(
         "POST /say request:\n%s",
@@ -366,9 +457,7 @@ def _load_worker_model(state: ServerState) -> TTSModel | None:
     if model is None:
         try:
             model = load(state.model_path)
-            if not hasattr(model, "generate") or model.generate is None:
-                msg = f"Model {state.model_path} does not support generation"
-                raise RuntimeError(msg)
+            state.engine.validate_model(model, state.model_path)
             state.model = model
         except BaseException as exc:
             logger.error("Model load failed in audio worker: %s", exc)
@@ -391,7 +480,7 @@ def _generate_item(state: ServerState, model: TTSModel, item: WorkItem) -> list[
         recorded on the item's status).
     """
     try:
-        chunks = generate_chunks(model, item.text, item.voice)
+        chunks = generate_chunks(state.engine, model, item.text, item.voice, item.instruct, state.streaming_interval)
         if state.normalize_audio and chunks:
             chunks = normalize_chunks(
                 chunks,
@@ -464,7 +553,7 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
             try:
                 play_stream(
                     player,
-                    streaming_chunk_iter(model, item.text, item.voice, settings),
+                    streaming_chunk_iter(state.engine, model, item.text, item.voice, item.instruct, settings),
                     output_path,
                     on_complete,
                     on_error,
@@ -561,6 +650,8 @@ def server_audio_worker(state: ServerState) -> None:
 class _ServerConfig:
     """Parsed server configuration from config.yaml."""
 
+    engine: str
+    language: str | None
     model_path: str
     sample_rate: int
     default_voice: str
@@ -599,7 +690,19 @@ def _parse_server_config() -> _ServerConfig:
         msg = "'default_voice' in config.yaml must be a string"
         raise ValueError(msg)
 
+    engine = _require(config, "engine")
+    if not isinstance(engine, str):
+        msg = "'engine' in config.yaml must be a string"
+        raise ValueError(msg)
+
+    language = config.get("language")
+    if language is not None and not isinstance(language, str):
+        msg = "'language' in config.yaml must be a string"
+        raise ValueError(msg)
+
     return _ServerConfig(
+        engine=engine,
+        language=language,
         model_path=model_path,
         sample_rate=int(cast(int, _require(config, "sample_rate"))),
         default_voice=default_voice,
@@ -623,12 +726,14 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
     worker on its own thread (see server_audio_worker), because MLX GPU streams
     are thread-local.
     """
-    available_voices = discover_voices(Path(cfg.model_path))
+    engine = build_engine(cfg.engine, cfg.language)
+    available_voices = engine.discover_voices(Path(cfg.model_path))
     if cfg.default_voice not in available_voices:
         msg = f"default_voice '{cfg.default_voice}' not found. Available: {', '.join(available_voices)}"
         raise ValueError(msg)
 
     return ServerState(
+        engine=engine,
         model=None,
         model_path=cfg.model_path,
         voices=available_voices,

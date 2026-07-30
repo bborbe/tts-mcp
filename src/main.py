@@ -17,9 +17,9 @@ from src.tts import (
     OUTPUT_DIR,
     AudioSettings,
     audio_worker_from_model_id,
+    build_engine,
     clean_text,
     discover_models,
-    discover_voices,
     load_config,
     make_output_path,
     simplify_punctuation,
@@ -44,6 +44,8 @@ class CliConfig:
     settings as a typed object rather than a positional tuple.
     """
 
+    engine: str
+    language: str | None
     sample_rate: int
     save_wav: bool
     simplify_punctuation: bool
@@ -294,7 +296,19 @@ def load_cli_config() -> CliConfig:
         min_duration_seconds=float(cast(float, _require(config, "min_duration_seconds"))),
     )
 
+    engine = _require(config, "engine")
+    if not isinstance(engine, str):
+        msg = "'engine' in config.yaml must be a string"
+        raise ValueError(msg)
+
+    language = config.get("language")
+    if language is not None and not isinstance(language, str):
+        msg = "'language' in config.yaml must be a string"
+        raise ValueError(msg)
+
     return CliConfig(
+        engine=engine,
+        language=language,
         sample_rate=int(cast(int, _require(config, "sample_rate"))),
         save_wav=bool(_require(config, "save_wav")),
         simplify_punctuation=bool(config.get("simplify_punctuation")),
@@ -318,7 +332,8 @@ def main() -> None:
     cfg = load_cli_config()
 
     model_dir = resolve_model_dir(args.model)
-    available_voices = discover_voices(Path(model_dir))
+    engine = build_engine(cfg.engine, cfg.language)
+    available_voices = engine.discover_voices(Path(model_dir))
 
     voice: str = args.voice if args.voice else select_voice(available_voices)
 
@@ -349,7 +364,7 @@ def main() -> None:
 
     worker = threading.Thread(
         target=audio_worker_from_model_id,
-        args=(work_queue, model_dir, voice, output_path, settings, ready_queue),
+        args=(work_queue, engine, model_dir, voice, output_path, settings, ready_queue),
         daemon=True,
     )
     worker.start()

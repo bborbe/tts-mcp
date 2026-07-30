@@ -11,6 +11,7 @@ import numpy as np
 import pyloudnorm as pyln
 from mlx_audio.tts.utils import load
 
+from src.tts.engine import TTSEngine
 from src.tts.generate import generate_chunks, iter_stream_chunks
 from src.tts.normalize import normalize_chunks, normalize_stream
 from src.tts.player import AudioPlayer, PlaybackJob, play_stream
@@ -51,9 +52,9 @@ class AudioSettings:
     streaming_warmup_seconds: float
 
 
-def _generate_worker_chunks(model: TTSModel, text: str, voice: str, settings: AudioSettings) -> list[np.ndarray] | None:
+def _generate_worker_chunks(engine: TTSEngine, model: TTSModel, text: str, voice: str, settings: AudioSettings) -> list[np.ndarray] | None:
     try:
-        generated = generate_chunks(model, text, voice)
+        generated = generate_chunks(engine, model, text, voice, None, settings.streaming_interval)
         if settings.normalize_audio and generated:
             generated = normalize_chunks(
                 generated,
@@ -110,7 +111,14 @@ def _cli_stream_callbacks(
     return on_complete, on_error
 
 
-def streaming_chunk_iter(model: TTSModel, text: str, voice: str, settings: AudioSettings) -> Iterator[np.ndarray]:
+def streaming_chunk_iter(
+    engine: TTSEngine,
+    model: TTSModel,
+    text: str,
+    voice: str,
+    instruct: str | None,
+    settings: AudioSettings,
+) -> Iterator[np.ndarray]:
     """Build the chunk iterator for streaming playback, optionally normalized.
 
     When settings.normalize_audio is set, the raw generation stream is wrapped
@@ -118,7 +126,7 @@ def streaming_chunk_iter(model: TTSModel, text: str, voice: str, settings: Audio
     audio matches the buffered path's loudness without waiting for the whole
     utterance.
     """
-    chunks = iter_stream_chunks(model, text, voice, settings.streaming_interval)
+    chunks = iter_stream_chunks(engine, model, text, voice, instruct, settings.streaming_interval)
     if settings.normalize_audio:
         chunks = normalize_stream(
             chunks,
@@ -134,6 +142,7 @@ def streaming_chunk_iter(model: TTSModel, text: str, voice: str, settings: Audio
 
 def _run_streaming_worker(
     work_queue: queue.Queue[str | None],
+    engine: TTSEngine,
     model: TTSModel,
     voice: str,
     output_path: Path | None,
@@ -159,7 +168,7 @@ def _run_streaming_worker(
         try:
             play_stream(
                 player,
-                streaming_chunk_iter(model, text, voice, settings),
+                streaming_chunk_iter(engine, model, text, voice, None, settings),
                 output_path,
                 on_complete,
                 on_error,
@@ -174,6 +183,7 @@ def _run_streaming_worker(
 
 def _run_buffered_worker(
     work_queue: queue.Queue[str | None],
+    engine: TTSEngine,
     model: TTSModel,
     voice: str,
     output_path: Path | None,
@@ -202,7 +212,7 @@ def _run_buffered_worker(
                 playback_done.wait()
             break
 
-        generated = _generate_worker_chunks(model, text, voice, settings)
+        generated = _generate_worker_chunks(engine, model, text, voice, settings)
         if generated is not None:
             pending_chunks = generated
         work_queue.task_done()
@@ -216,6 +226,7 @@ def _run_buffered_worker(
 
 def audio_worker(
     work_queue: queue.Queue[str | None],
+    engine: TTSEngine,
     model: TTSModel,
     voice: str,
     output_path: Path | None,
@@ -231,6 +242,7 @@ def audio_worker(
 
     Args:
         work_queue: Queue of text strings to synthesize. None signals shutdown.
+        engine: Engine that knows how to drive the configured model family.
         model: Loaded TTS model.
         voice: Voice to use for synthesis.
         output_path: Path to save generated audio, or None to skip saving.
@@ -239,15 +251,16 @@ def audio_worker(
     player = AudioPlayer(settings.sample_rate, settings.lead_silence_ms)
     try:
         if settings.stream:
-            _run_streaming_worker(work_queue, model, voice, output_path, player, settings)
+            _run_streaming_worker(work_queue, engine, model, voice, output_path, player, settings)
         else:
-            _run_buffered_worker(work_queue, model, voice, output_path, player, settings)
+            _run_buffered_worker(work_queue, engine, model, voice, output_path, player, settings)
     finally:
         player.close()
 
 
 def audio_worker_from_model_id(
     work_queue: queue.Queue[str | None],
+    engine: TTSEngine,
     model_id: str,
     voice: str,
     output_path: Path | None,
@@ -261,9 +274,7 @@ def audio_worker_from_model_id(
     """
     try:
         model = load(model_id)
-        if not hasattr(model, "generate") or model.generate is None:
-            msg = f"Model {model_id} does not support generation"
-            raise RuntimeError(msg)
+        engine.validate_model(model, model_id)
     except BaseException as exc:
         if ready_queue is None:
             raise
@@ -273,4 +284,4 @@ def audio_worker_from_model_id(
     if ready_queue is not None:
         ready_queue.put(None)
 
-    audio_worker(work_queue, model, voice, output_path, settings)
+    audio_worker(work_queue, engine, model, voice, output_path, settings)

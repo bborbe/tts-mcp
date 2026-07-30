@@ -5,7 +5,6 @@ from src.tts.config import (
     OUTPUT_DIR,
     config_env_var,
     discover_models,
-    discover_voices,
     load_config,
     make_output_path,
     resolve_config_path,
@@ -15,9 +14,17 @@ from src.tts.device import (
     restart_process_on_device_change,
     start_output_device_change_watcher,
 )
+from src.tts.engine import (
+    ENGINE_KINDS,
+    QWEN3,
+    VOXTRAL,
+    Qwen3Engine,
+    TTSEngine,
+    VoxtralEngine,
+    build_engine,
+)
 from src.tts.generate import (
     generate_chunks,
-    generate_speech,
     iter_stream_chunks,
 )
 from src.tts.normalize import (
@@ -34,7 +41,7 @@ from src.tts.player import (
     play_stream,
     save_audio,
 )
-from src.tts.protocols import TTSModel
+from src.tts.protocols import CustomVoiceModel, TTSModel
 from src.tts.text import (
     clean_text,
     simplify_punctuation,
@@ -48,22 +55,28 @@ from src.tts.worker import (
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "ENGINE_KINDS",
     "OUTPUT_DIR",
+    "QWEN3",
+    "VOXTRAL",
     "AudioPlayer",
     "AudioSettings",
+    "CustomVoiceModel",
     "PlaybackJob",
+    "Qwen3Engine",
     "StreamingPlaybackJob",
+    "TTSEngine",
     "TTSModel",
+    "VoxtralEngine",
     "audio_worker",
     "audio_worker_from_model_id",
     "boost_gain",
+    "build_engine",
     "clean_text",
     "config_env_var",
     "default_output_device_id",
     "discover_models",
-    "discover_voices",
     "generate_chunks",
-    "generate_speech",
     "iter_stream_chunks",
     "load_config",
     "make_output_path",

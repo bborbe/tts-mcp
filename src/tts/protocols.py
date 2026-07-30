@@ -30,6 +30,23 @@ class TTSModel(Protocol):
         ...
 
 
+class CustomVoiceModel(Protocol):
+    """Protocol for a TTS model driven by a named speaker plus a language.
+
+    Implemented by Qwen3-TTS CustomVoice models, which do not take a ``voice``
+    argument on ``generate``. Kept separate from TTSModel because no model family
+    implements both call styles.
+    """
+
+    def generate_custom_voice(self, text: str, speaker: str, language: str, **kwargs: object) -> Iterator[GenerationResult]:
+        """Generate speech audio chunks using a named speaker and language.
+
+        ``instruct`` carries an optional free-text emotion/style instruction;
+        ``stream=True`` behaves as described for TTSModel.generate.
+        """
+        ...
+
+
 class AudioOutputStream(Protocol):
     """Runtime methods used from sounddevice.OutputStream."""
 
