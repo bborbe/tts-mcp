@@ -5,7 +5,7 @@ description: Manage TTS voice mode for the current session and apply the spoken-
 
 ## What this does
 
-Controls whether Claude speaks via `mcp__tts__say` this session, and how. The persistent default lives in `~/.claude/CLAUDE.md` ("Voice: Attention Signals Only … casual_male"); this skill is the **session-scoped** toggle plus the speaking playbook. A skill cannot force behavior across turns on its own — it sets the mode for the rest of this session and reminds Claude of the rules.
+Controls whether Claude speaks via `mcp__tts__say` this session, and how. The persistent default lives in `~/.claude/CLAUDE.md` ("Voice Attention Only … `ryan`"); this skill is the **session-scoped** toggle plus the speaking playbook. A skill cannot force behavior across turns on its own — it sets the mode for the rest of this session and reminds Claude of the rules.
 
 ## Args
 
@@ -15,7 +15,7 @@ Controls whether Claude speaks via `mcp__tts__say` this session, and how. The pe
 - `status` — report the current mode and voice.
 - `restart` (alias `fix`) — restart the TTS server. Use when audio goes silent after switching the Mac's output device (AirPods, headphones): the server binds the default output device once at process init, so a device switch leaves it playing into the void. Runs `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp`, waits for `/health`, then verifies via `/tts-mcp:voice-selfcheck`. See the Restart section below.
 
-On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (casual_male)` or `🔇 voice: off`).
+On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (ryan)` or `🔇 voice: off`).
 
 ## No selftest on activation
 
@@ -28,7 +28,7 @@ When you actually need proof the audio path works — silence mid-session, a dev
 Use when audio silently stops after a device switch (AirPods connect, headphones unplug). The server is a launchd-supervised FastAPI process (`com.bborbe.tts-mcp`) that binds the default output device at init; a switch orphans it.
 
 1. `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp` (KeepAlive respawns a fresh process against the current default device).
-2. Poll health until ready (model reload takes ~15–20s; `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag): `curl -s http://127.0.0.1:12000/health`.
+2. Poll health until ready — `curl -s http://127.0.0.1:12000/health`. `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag. Model reload is ~1-3s on `engine: qwen3`, ~15-20s on `engine: voxtral`.
 3. Verify: run `/tts-mcp:voice-selfcheck`.
 4. If still silent after restart, it's not the device binding — follow the troubleshooting steps in `/tts-mcp:voice-selfcheck` (server unreachable / stuck queue / synth error).
 
@@ -38,7 +38,7 @@ Caveats: in-flight messages are dropped across a restart; message IDs reset; one
 
 Speech is a different channel from the terminal text. When you call `mcp__tts__say`:
 
-- **Voice `casual_male`, always.**
+- **Voice `ryan`, always.** (`ryan` is a Qwen3-TTS CustomVoice speaker. If the server runs `engine: voxtral`, its voices are Voxtral names such as `casual_male` instead — check `get_voices` when a voice is rejected.)
 - **Lead with a throwaway word.** CoreAudio clips the first ~word of each utterance. Start every spoken message with a disposable lead token — `"Okay."`, `"So,"`, `"Right,"` — so the clip eats that, not the real first word. Never let a content word be first.
 - **Terse.** One idea per sentence. This is a nudge to attention, not a recital of the on-screen text — never read a whole reply aloud.
 - **No markup in speech.** No markdown, URLs, file paths, code, or backticks — describe them in words ("the controller Makefile", not "`Makefile.k8s`").
