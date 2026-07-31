@@ -1,4 +1,8 @@
 release:
   autoRelease: true
+  # This repo is a fork of florianbuetow/tts-mcp. github-release-watcher gates
+  # forks behind an explicit opt-in so an inherited .maintainer.yaml never
+  # auto-tags a fork nobody intended to release. Requires watcher >= v0.3.1.
+  allowFork: true
 prReviewer:
   autoApprove: true
