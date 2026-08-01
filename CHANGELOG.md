@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.3.1
 
 - chore: opt this fork into auto-release via `release.allowFork` in `.maintainer.yaml`. `github-release-watcher` previously dropped forked repos during repo listing — upstream of the `.maintainer.yaml` trust gate — so this repo's `autoRelease: true` was never read and v0.3.0 had to be tagged by hand. Fixed in watcher v0.3.1 (`maintainer` v0.48.0 adds the `allowFork` field, `github-releaser-agent` v0.3.2 accepts it under strict config parsing); forks now reach the filter chain and release only with this explicit opt-in. This release is itself the end-to-end proof: it is the first tag on this repo cut automatically rather than by hand.
 
