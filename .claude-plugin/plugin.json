@@ -1,7 +1,7 @@
 {
   "name": "tts-mcp",
   "description": "Local text-to-speech for Claude Code — /voice session toggle plus the spoken-output playbook, backed by the tts-mcp server",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": {
     "name": "Benjamin Borbe"
   },
