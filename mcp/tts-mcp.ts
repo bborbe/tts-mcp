@@ -217,21 +217,31 @@ server.tool(
       .optional()
       .describe(
         "Optional emotion/style instruction, e.g. 'Very happy and excited.'. " +
-          "Only supported when the server runs the qwen3 engine; the voxtral " +
-          "engine rejects it.",
+          "Only supported by the qwen3 engine; requests pairing it with a " +
+          "voxtral voice are rejected.",
+      ),
+    engine: z
+      .string()
+      .optional()
+      .describe(
+        "Engine to synthesize with, e.g. 'qwen3' or 'voxtral'. Omit to use " +
+          "the server default. The voice must belong to this engine — see " +
+          "get_voices for the per-engine grouping. The first request for an " +
+          "engine loads its model, which can take ~15-20s; later requests are " +
+          "immediate.",
       ),
   },
-  async ({ voice, text, instruct }) => {
+  async ({ voice, text, instruct, engine }) => {
     console.error(
-      `[tts-mcp] say: voice=${voice} instruct=${instruct ?? "-"} text="${text.slice(0, 80)}"`,
+      `[tts-mcp] say: voice=${voice} engine=${engine ?? "default"} instruct=${instruct ?? "-"} text="${text.slice(0, 80)}"`,
     );
-    return request("POST", "/say", { text, voice, instruct });
+    return request("POST", "/say", { text, voice, instruct, engine });
   },
 );
 
 server.tool(
   "get_voices",
-  "List all available TTS voices and the default voice from the speech server.",
+  "List all available TTS voices and the default voice from the speech server. The response also groups voices per engine, with each engine's language, whether it supports instruct, and whether its model is already loaded.",
   {},
   async () => {
     console.error("[tts-mcp] get_voices");
@@ -241,7 +251,7 @@ server.tool(
 
 server.tool(
   "get_status",
-  "Check status of a speech synthesis request. Returns status (queued/playing/completed/error), original text, audio file path, and error details.",
+  "Check status of a speech synthesis request. Returns status (queued/loading/playing/completed/error), the engine used, original text, audio file path, and error details. 'loading' means the request is waiting on its engine's model to load.",
   {
     message_id: z
       .string()

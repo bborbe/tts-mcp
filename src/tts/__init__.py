@@ -42,6 +42,7 @@ from src.tts.player import (
     save_audio,
 )
 from src.tts.protocols import CustomVoiceModel, TTSModel
+from src.tts.registry import EngineRegistry, EngineSpec, LoadedEngine
 from src.tts.text import (
     clean_text,
     simplify_punctuation,
@@ -62,6 +63,9 @@ __all__ = [
     "AudioPlayer",
     "AudioSettings",
     "CustomVoiceModel",
+    "EngineRegistry",
+    "EngineSpec",
+    "LoadedEngine",
     "PlaybackJob",
     "Qwen3Engine",
     "StreamingPlaybackJob",

@@ -278,6 +278,60 @@ def _require(config: dict[str, object], key: str) -> object:
     return value
 
 
+def _resolve_cli_engine(config: dict[str, object]) -> tuple[str, str | None]:
+    """Pick the engine the CLI should use, from either config form.
+
+    The server accepts an ``engines:`` mapping with a ``default_engine:``; the
+    CLI drives one engine at a time, so it uses that default. The flat
+    ``engine:``/``language:`` keys keep working unchanged — without this the CLI
+    would break the moment config.yaml migrated to the mapping form.
+
+    Args:
+        config: Raw config mapping.
+
+    Returns:
+        The engine kind and its language (None for engines that take none).
+
+    Raises:
+        ValueError: If the declaration is missing or malformed.
+    """
+    engines_block = config.get("engines")
+    if engines_block is None:
+        engine = _require(config, "engine")
+        if not isinstance(engine, str):
+            msg = "'engine' in config.yaml must be a string"
+            raise ValueError(msg)
+        language = config.get("language")
+        if language is not None and not isinstance(language, str):
+            msg = "'language' in config.yaml must be a string"
+            raise ValueError(msg)
+        return engine, language
+
+    if not isinstance(engines_block, dict) or not engines_block:
+        msg = "'engines' in config.yaml must be a non-empty mapping of engine name to settings"
+        raise ValueError(msg)
+    engines = cast(dict[str, object], engines_block)
+
+    default_engine = config.get("default_engine")
+    if default_engine is None:
+        default_engine = next(iter(engines))
+    if not isinstance(default_engine, str):
+        msg = "'default_engine' in config.yaml must be a string"
+        raise ValueError(msg)
+
+    block = engines.get(default_engine)
+    if not isinstance(block, dict):
+        msg = f"default_engine '{default_engine}' is not declared in 'engines'"
+        raise ValueError(msg)
+
+    language = cast(dict[str, object], block).get("language")
+    if language is not None and not isinstance(language, str):
+        msg = f"engines.{default_engine}.language in config.yaml must be a string"
+        raise ValueError(msg)
+
+    return default_engine, language
+
+
 def load_cli_config() -> CliConfig:
     """Load CLI-relevant settings from config.yaml.
 
@@ -296,15 +350,7 @@ def load_cli_config() -> CliConfig:
         min_duration_seconds=float(cast(float, _require(config, "min_duration_seconds"))),
     )
 
-    engine = _require(config, "engine")
-    if not isinstance(engine, str):
-        msg = "'engine' in config.yaml must be a string"
-        raise ValueError(msg)
-
-    language = config.get("language")
-    if language is not None and not isinstance(language, str):
-        msg = "'language' in config.yaml must be a string"
-        raise ValueError(msg)
+    engine, language = _resolve_cli_engine(config)
 
     return CliConfig(
         engine=engine,

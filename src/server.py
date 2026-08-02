@@ -16,16 +16,17 @@ from typing import cast
 import numpy as np
 import pyloudnorm as pyln
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from mlx_audio.tts.utils import load
 from pydantic import BaseModel
 
 from src.tts import (
     OUTPUT_DIR,
+    QWEN3,
     AudioPlayer,
     AudioSettings,
+    EngineRegistry,
+    EngineSpec,
+    LoadedEngine,
     PlaybackJob,
-    TTSEngine,
-    TTSModel,
     build_engine,
     clean_text,
     default_output_device_id,
@@ -53,6 +54,7 @@ class WorkItem:
     text: str
     voice: str
     instruct: str | None
+    engine: str
 
 
 @dataclasses.dataclass
@@ -65,6 +67,7 @@ class MessageStatus:
     audio_file: str | None
     error: str | None
     completed_at: float | None
+    engine: str | None = None
 
 
 class ServerState:
@@ -72,10 +75,9 @@ class ServerState:
 
     def __init__(
         self,
-        engine: TTSEngine,
-        model: TTSModel | None,
-        model_path: str,
-        voices: list[str],
+        registry: EngineRegistry,
+        voices_by_engine: dict[str, list[str]],
+        default_engine: str,
         default_voice: str,
         sample_rate: int,
         lead_silence_ms: int,
@@ -93,13 +95,12 @@ class ServerState:
         """Initialize server state.
 
         Args:
-            engine: Engine that knows how to drive the configured model family.
-            model: Pre-loaded TTS model, or None to have the audio worker load
-                it on its own thread. MLX GPU streams are thread-local, so the
-                model must be loaded on the same thread that calls generate.
-            model_path: Filesystem path to the model, used by the audio worker
-                to load the model on its own thread when model is None.
-            voices: Available voice names.
+            registry: Lazy per-engine model cache. Owned by the audio worker —
+                MLX GPU streams are thread-local, so every model it loads is
+                only usable on the worker thread that loaded it.
+            voices_by_engine: Available voice names per engine kind, discovered
+                from disk at startup without loading any model.
+            default_engine: Engine used by requests that name none.
             default_voice: Default voice for requests without voice override.
             sample_rate: Audio sample rate in Hz.
             lead_silence_ms: Silence written after each audio stream open/reopen.
@@ -115,10 +116,9 @@ class ServerState:
             streaming_warmup_seconds: Seconds buffered to measure the streaming
                 normalization gain (see normalize_stream).
         """
-        self._engine = engine
-        self.model: TTSModel | None = model
-        self._model_path = model_path
-        self._voices = voices
+        self._registry = registry
+        self._voices_by_engine = voices_by_engine
+        self._default_engine = default_engine
         self._default_voice = default_voice
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
@@ -135,24 +135,97 @@ class ServerState:
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
+        self.engine_errors: dict[str, str] = {}
+        self._loaded_engines: set[str] = set()
         self._status_lock = threading.Lock()
         self._counter = 0
         self._counter_lock = threading.Lock()
 
     @property
-    def engine(self) -> TTSEngine:
-        """Engine that knows how to drive the configured model family."""
-        return self._engine
+    def registry(self) -> EngineRegistry:
+        """Lazy per-engine model cache, owned by the audio worker thread."""
+        return self._registry
 
     @property
-    def model_path(self) -> str:
-        """Filesystem path to the model, loaded by the audio worker."""
-        return self._model_path
+    def default_engine(self) -> str:
+        """Engine used by requests that name none."""
+        return self._default_engine
+
+    @property
+    def voices_by_engine(self) -> dict[str, list[str]]:
+        """Available voice names per engine kind."""
+        return self._voices_by_engine
+
+    @property
+    def engines(self) -> list[str]:
+        """Engine kinds that discovered their voices and can serve requests."""
+        return sorted(self._voices_by_engine)
 
     @property
     def voices(self) -> list[str]:
-        """Available voice names."""
-        return self._voices
+        """Available voice names across every available engine."""
+        seen: list[str] = []
+        for kind in sorted(self._voices_by_engine):
+            seen.extend(voice for voice in self._voices_by_engine[kind] if voice not in seen)
+        return seen
+
+    def voices_for(self, engine: str) -> list[str]:
+        """List the voices one engine offers.
+
+        Args:
+            engine: Engine kind to look up.
+
+        Returns:
+            That engine's voices, or an empty list when it is unavailable.
+        """
+        return self._voices_by_engine.get(engine, [])
+
+    def mark_engine_loaded(self, engine: str) -> None:
+        """Record that an engine's model is now resident.
+
+        Called by the audio worker; read by /voices on the HTTP thread, so the
+        worker's own registry dict is never touched from another thread.
+
+        Args:
+            engine: Engine kind whose model finished loading.
+        """
+        with self._status_lock:
+            self._loaded_engines.add(engine)
+            self.engine_errors.pop(engine, None)
+
+    def mark_engine_failed(self, engine: str, error: str) -> None:
+        """Record that an engine's model failed to load.
+
+        Args:
+            engine: Engine kind whose load failed.
+            error: Human-readable failure description.
+        """
+        with self._status_lock:
+            self.engine_errors[engine] = error
+
+    def is_engine_loaded(self, engine: str) -> bool:
+        """Report whether an engine's model is resident.
+
+        Args:
+            engine: Engine kind to check.
+
+        Returns:
+            True once the worker has loaded that engine's model.
+        """
+        with self._status_lock:
+            return engine in self._loaded_engines
+
+    def engine_error(self, engine: str) -> str | None:
+        """Return the recorded load failure for an engine, if any.
+
+        Args:
+            engine: Engine kind to check.
+
+        Returns:
+            The failure description, or None.
+        """
+        with self._status_lock:
+            return self.engine_errors.get(engine)
 
     @property
     def default_voice(self) -> str:
@@ -268,6 +341,7 @@ class SayRequest(BaseModel):
     text: str
     voice: str | None = None
     instruct: str | None = None
+    engine: str | None = None
 
 
 class SayResponse(BaseModel):
@@ -286,13 +360,34 @@ class StatusResponse(BaseModel):
     text: str
     audio_file: str | None = None
     error: str | None = None
+    engine: str | None = None
+
+
+class EngineVoices(BaseModel):
+    """One engine's voices and availability, as reported by GET /voices."""
+
+    engine: str
+    voices: list[str]
+    default_voice: str | None = None
+    language: str | None = None
+    supports_instruct: bool = False
+    loaded: bool = False
+    available: bool = True
+    error: str | None = None
 
 
 class VoicesResponse(BaseModel):
-    """Response body for GET /voices."""
+    """Response body for GET /voices.
+
+    ``voices`` is the union across available engines, so a caller can pick any
+    listed voice and pass it with the matching ``engine``. The first request for
+    an engine whose model is not yet resident waits on that load.
+    """
 
     voices: list[str]
     default_voice: str
+    default_engine: str = ""
+    engines: list[EngineVoices] = []
 
 
 class HealthResponse(BaseModel):
@@ -312,9 +407,32 @@ def health() -> HealthResponse:
 
 @router.get("/voices")
 def voices(request: Request) -> VoicesResponse:
-    """List available voices."""
+    """List available voices, flat and grouped per engine."""
     state: ServerState = request.app.state.server
-    return VoicesResponse(voices=state.voices, default_voice=state.default_voice)
+
+    engines: list[EngineVoices] = []
+    for kind in state.registry.kinds():
+        spec = state.registry.spec(kind)
+        engine_voices = state.voices_for(kind)
+        engines.append(
+            EngineVoices(
+                engine=kind,
+                voices=engine_voices,
+                default_voice=state.default_voice if kind == state.default_engine else None,
+                language=spec.language if spec is not None else None,
+                supports_instruct=kind == QWEN3,
+                loaded=state.is_engine_loaded(kind),
+                available=bool(engine_voices),
+                error=state.engine_error(kind),
+            )
+        )
+
+    return VoicesResponse(
+        voices=state.voices,
+        default_voice=state.default_voice,
+        default_engine=state.default_engine,
+        engines=engines,
+    )
 
 
 @router.post("/say", status_code=202)
@@ -329,11 +447,35 @@ def say(request: Request, body: SayRequest) -> SayResponse:
     if state.simplify_punctuation:
         cleaned = simplify_punctuation(cleaned)
 
-    voice = body.voice if body.voice else state.default_voice
-    if voice not in state.voices:
+    engine = body.engine if body.engine else state.default_engine
+    if engine not in state.registry.kinds():
         raise HTTPException(
             status_code=400,
-            detail=f"Voice '{voice}' not available. Available voices: {', '.join(state.voices)}",
+            detail=f"Unknown engine '{engine}'. Configured engines: {', '.join(state.registry.kinds())}",
+        )
+
+    engine_voices = state.voices_for(engine)
+    if not engine_voices:
+        error = state.engine_error(engine) or "voice discovery failed"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Engine '{engine}' is unavailable: {error}",
+        )
+
+    voice = body.voice if body.voice else state.default_voice
+    if voice not in engine_voices:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Voice '{voice}' not available on engine '{engine}'. Available voices: {', '.join(engine_voices)}",
+        )
+
+    # Reject instruct here rather than letting the engine raise inside the
+    # worker, which would return 202 and only fail after the caller stopped
+    # looking — and would pointlessly load the model first.
+    if body.instruct is not None and engine != QWEN3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'instruct' is not supported by the {engine} engine",
         )
 
     message_id = state.next_message_id()
@@ -348,13 +490,17 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             audio_file=None,
             error=None,
             completed_at=None,
+            engine=engine,
         )
 
-    state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct))
+    state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct, engine=engine))
 
     logger.debug(
         "POST /say request:\n%s",
-        json.dumps({"text": body.text, "voice": voice, "message_id": message_id}, indent=2),
+        json.dumps(
+            {"text": body.text, "voice": voice, "engine": engine, "message_id": message_id},
+            indent=2,
+        ),
     )
 
     return SayResponse(message_id=message_id, status="queued", queue_position=queue_position)
@@ -379,6 +525,7 @@ def status(request: Request, message_id: str) -> StatusResponse:
         text=ms.text,
         audio_file=ms.audio_file,
         error=ms.error,
+        engine=ms.engine,
     )
 
 
@@ -437,42 +584,78 @@ def _start_playback(
     return done
 
 
-def _load_worker_model(state: ServerState) -> TTSModel | None:
-    """Load the model on the calling (worker) thread if not already loaded.
+def _load_default_engine(state: ServerState) -> LoadedEngine | None:
+    """Load the default engine's model on the calling (worker) thread.
 
     MLX GPU streams are thread-local, so the model must be loaded on the same
     thread that later calls generate; loading on one thread and generating on
     another raises "no Stream(gpu, N) in current thread" (the same failure
     fixed for the CLI in audio_worker_from_model_id). The load outcome is
     reported through state.ready_queue so startup failures surface on the
-    caller's thread.
+    caller's thread and abort startup.
+
+    Only the default engine is loaded here. Other engines load lazily on first
+    use — see _resolve_engine, which must NOT signal ready_queue and must NOT
+    kill the worker.
 
     Args:
-        state: Server state holding the (optional) model and its path.
+        state: Server state holding the engine registry.
 
     Returns:
-        The loaded model, or None if loading failed.
+        The loaded default engine, or None if loading failed.
     """
-    model = state.model
-    if model is None:
-        try:
-            model = load(state.model_path)
-            state.engine.validate_model(model, state.model_path)
-            state.model = model
-        except BaseException as exc:
-            logger.error("Model load failed in audio worker: %s", exc)
-            state.ready_queue.put(exc)
-            return None
+    try:
+        loaded = state.registry.get(state.default_engine)
+    except BaseException as exc:
+        logger.error("Model load failed in audio worker: %s", exc)
+        state.mark_engine_failed(state.default_engine, str(exc))
+        state.ready_queue.put(exc)
+        return None
+    state.mark_engine_loaded(state.default_engine)
     state.ready_queue.put(None)
-    return model
+    return loaded
 
 
-def _generate_item(state: ServerState, model: TTSModel, item: WorkItem) -> list[np.ndarray] | None:
+def _resolve_engine(state: ServerState, item: WorkItem) -> LoadedEngine | None:
+    """Return the engine for this item, loading its model on first use.
+
+    Unlike _load_default_engine this never touches ready_queue and never kills
+    the worker: a bad non-default engine must not take down an already-working
+    default. The failure is recorded on the item and on the engine, and the
+    registry caches it so later items for the same engine fail immediately
+    instead of retrying a load that takes ~20 seconds to fail.
+
+    Args:
+        state: Server state holding the engine registry.
+        item: Work item naming the engine to resolve.
+
+    Returns:
+        The loaded engine, or None if it could not be loaded.
+    """
+    if not state.registry.is_loaded(item.engine):
+        with state.status_lock:
+            status = state.statuses.get(item.message_id)
+            if status is not None:
+                status.status = "loading"
+
+    try:
+        loaded = state.registry.get(item.engine)
+    except Exception as exc:
+        logger.error("Engine '%s' failed to load for %s: %s", item.engine, item.message_id, exc)
+        state.mark_engine_failed(item.engine, str(exc))
+        _fail_item(state, item.message_id, f"engine '{item.engine}' failed to load: {exc}")
+        return None
+
+    state.mark_engine_loaded(item.engine)
+    return loaded
+
+
+def _generate_item(state: ServerState, loaded: LoadedEngine, item: WorkItem) -> list[np.ndarray] | None:
     """Generate and optionally normalize audio chunks for one work item.
 
     Args:
         state: Server state with normalization settings and meter.
-        model: Loaded TTS model (loaded on the worker thread).
+        loaded: Engine and model for this item (loaded on the worker thread).
         item: Work item to synthesize.
 
     Returns:
@@ -480,7 +663,7 @@ def _generate_item(state: ServerState, model: TTSModel, item: WorkItem) -> list[
         recorded on the item's status).
     """
     try:
-        chunks = generate_chunks(state.engine, model, item.text, item.voice, item.instruct, state.streaming_interval)
+        chunks = generate_chunks(loaded.engine, loaded.model, item.text, item.voice, item.instruct, state.streaming_interval)
         if state.normalize_audio and chunks:
             chunks = normalize_chunks(
                 chunks,
@@ -525,7 +708,7 @@ def _playback_status_callbacks(
     return on_complete, on_error
 
 
-def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: AudioPlayer) -> None:
+def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
     """Process queued requests in streaming mode: play each utterance as it generates.
 
     Audio starts after the first chunk instead of after the whole utterance. When
@@ -543,6 +726,11 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
                 break
             current_item = item
 
+            loaded = _resolve_engine(state, item)
+            if loaded is None:
+                state.work_queue.task_done()
+                continue
+
             with state.status_lock:
                 state.statuses[item.message_id].status = "playing"
 
@@ -553,7 +741,7 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
             try:
                 play_stream(
                     player,
-                    streaming_chunk_iter(state.engine, model, item.text, item.voice, item.instruct, settings),
+                    streaming_chunk_iter(loaded.engine, loaded.model, item.text, item.voice, item.instruct, settings),
                     output_path,
                     on_complete,
                     on_error,
@@ -574,7 +762,7 @@ def _run_streaming_server_loop(state: ServerState, model: TTSModel, player: Audi
                     state.work_queue.task_done()
 
 
-def _run_buffered_server_loop(state: ServerState, model: TTSModel, player: AudioPlayer) -> None:
+def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
     """Process queued requests in buffered mode with cross-message lookahead.
 
     Generates the full utterance (and optional loudness normalization) before
@@ -598,7 +786,12 @@ def _run_buffered_server_loop(state: ServerState, model: TTSModel, player: Audio
 
             current_item = item
 
-            chunks = _generate_item(state, model, item)
+            loaded = _resolve_engine(state, item)
+            if loaded is None:
+                state.work_queue.task_done()
+                continue
+
+            chunks = _generate_item(state, loaded, item)
             if chunks is not None:
                 pending = (item, chunks)
 
@@ -623,36 +816,52 @@ def _run_buffered_server_loop(state: ServerState, model: TTSModel, player: Audio
 def server_audio_worker(state: ServerState) -> None:
     """Background worker that processes queued TTS requests sequentially.
 
-    Loads the model on this thread when it was not pre-loaded (see
-    _load_worker_model), because MLX GPU streams are thread-local. Dispatches to
-    the streaming or buffered loop based on state.stream. Both wrap each
-    iteration in a top-level handler so unexpected exceptions are logged and the
-    worker keeps running instead of dying silently.
+    Loads the default engine's model on this thread (see _load_default_engine),
+    because MLX GPU streams are thread-local; other engines load lazily on this
+    same thread when an item first asks for them. Dispatches to the streaming or
+    buffered loop based on state.stream. Both wrap each iteration in a top-level
+    handler so unexpected exceptions are logged and the worker keeps running
+    instead of dying silently.
 
     Args:
-        state: Server state with work queue, model, and status tracking.
+        state: Server state with work queue, engine registry, and status tracking.
     """
-    model = _load_worker_model(state)
-    if model is None:
+    if _load_default_engine(state) is None:
         return
 
     player = AudioPlayer(state.sample_rate, state.lead_silence_ms)
     try:
         if state.stream:
-            _run_streaming_server_loop(state, model, player)
+            _run_streaming_server_loop(state, player)
         else:
-            _run_buffered_server_loop(state, model, player)
+            _run_buffered_server_loop(state, player)
     finally:
         player.close()
+
+
+@dataclasses.dataclass(frozen=True)
+class _EngineConfig:
+    """One engine declared in config.yaml.
+
+    Attributes:
+        kind: Engine identifier — one of ENGINE_KINDS.
+        model_path: Model directory for this engine.
+        language: Language for the qwen3 engine; must be None for voxtral.
+        default_voice: Voice used when a request names this engine but no voice.
+    """
+
+    kind: str
+    model_path: str
+    language: str | None
+    default_voice: str
 
 
 @dataclasses.dataclass(frozen=True)
 class _ServerConfig:
     """Parsed server configuration from config.yaml."""
 
-    engine: str
-    language: str | None
-    model_path: str
+    engines: tuple[_EngineConfig, ...]
+    default_engine: str
     sample_rate: int
     default_voice: str
     simplify_punctuation: bool
@@ -676,22 +885,58 @@ def _require(config: dict[str, object], key: str) -> object:
     return value
 
 
-def _parse_server_config() -> _ServerConfig:
-    """Load and validate server settings from config.yaml. Fails fast on missing keys."""
-    config = load_config()
+def _reject_per_engine_sample_rates(config: dict[str, object], sample_rate: int) -> None:
+    """Reject a per-engine ``sample_rate`` that disagrees with the global one.
 
+    The AudioPlayer and the loudness meter are built once per worker, so a
+    second engine at a different rate would be pitch-shifted and mis-metered.
+    Supporting that properly means reopening the output stream on every engine
+    switch, which the player's own docstring warns degrades the CoreAudio HAL.
+    Fail loudly instead of pretending.
+
+    Args:
+        config: Raw config mapping.
+        sample_rate: The global sample rate every engine must agree with.
+
+    Raises:
+        ValueError: If an engine declares a different sample rate.
+    """
+    engines_block = config.get("engines")
+    if not isinstance(engines_block, dict):
+        return
+    for kind, block in cast(dict[str, object], engines_block).items():
+        if not isinstance(block, dict):
+            continue
+        declared = cast(dict[str, object], block).get("sample_rate")
+        if declared is not None and int(cast(int, declared)) != sample_rate:
+            msg = (
+                f"engines.{kind}.sample_rate ({declared}) differs from the global sample_rate "
+                f"({sample_rate}). Per-engine sample rates are not supported."
+            )
+            raise ValueError(msg)
+
+
+def _parse_legacy_engine(config: dict[str, object], default_voice: str) -> tuple[_EngineConfig, ...]:
+    """Build a single-engine tuple from the flat ``engine:``/``model:`` keys.
+
+    Args:
+        config: Raw config mapping.
+        default_voice: Top-level default voice, used as this engine's default.
+
+    Returns:
+        A one-entry tuple describing the configured engine.
+
+    Raises:
+        ValueError: If 'engine' or 'language' has the wrong type.
+        FileNotFoundError: If the model directory does not exist.
+    """
     model_path = _require(config, "model")
     if not isinstance(model_path, str) or not Path(model_path).exists():
         msg = f"Model directory does not exist: {model_path!r}"
         raise FileNotFoundError(msg)
 
-    default_voice = _require(config, "default_voice")
-    if not isinstance(default_voice, str):
-        msg = "'default_voice' in config.yaml must be a string"
-        raise ValueError(msg)
-
-    engine = _require(config, "engine")
-    if not isinstance(engine, str):
+    kind = _require(config, "engine")
+    if not isinstance(kind, str):
         msg = "'engine' in config.yaml must be a string"
         raise ValueError(msg)
 
@@ -700,11 +945,116 @@ def _parse_server_config() -> _ServerConfig:
         msg = "'language' in config.yaml must be a string"
         raise ValueError(msg)
 
+    return (_EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=default_voice),)
+
+
+def _parse_engine_block(kind: str, block: object, default_voice: str) -> _EngineConfig:
+    """Parse one entry of the ``engines:`` mapping.
+
+    Args:
+        kind: Engine identifier this block is keyed by.
+        block: Raw mapping for this engine.
+        default_voice: Fallback default voice when the block omits one.
+
+    Returns:
+        The parsed engine declaration.
+
+    Raises:
+        ValueError: If the block is malformed or a value has the wrong type.
+    """
+    if not isinstance(block, dict):
+        msg = f"engines.{kind} in config.yaml must be a mapping"
+        raise ValueError(msg)
+    settings = cast(dict[str, object], block)
+
+    model_path = settings.get("model")
+    if not isinstance(model_path, str):
+        msg = f"engines.{kind}.model in config.yaml must be a string"
+        raise ValueError(msg)
+
+    language = settings.get("language")
+    if language is not None and not isinstance(language, str):
+        msg = f"engines.{kind}.language in config.yaml must be a string"
+        raise ValueError(msg)
+
+    voice = settings.get("default_voice", default_voice)
+    if not isinstance(voice, str):
+        msg = f"engines.{kind}.default_voice in config.yaml must be a string"
+        raise ValueError(msg)
+
+    return _EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=voice)
+
+
+def _parse_engines(config: dict[str, object], default_voice: str) -> tuple[tuple[_EngineConfig, ...], str]:
+    """Parse the engine declarations, accepting both the flat and mapping forms.
+
+    The flat ``engine:``/``model:``/``language:`` keys and the ``engines:``
+    mapping are mutually exclusive — silent precedence between two forms is a
+    bug factory, so declaring both is an error.
+
+    Args:
+        config: Raw config mapping.
+        default_voice: Top-level default voice.
+
+    Returns:
+        The declared engines and the default engine's kind.
+
+    Raises:
+        ValueError: If both forms are present, if 'engines' is empty or
+            malformed, or if 'default_engine' is missing or unknown.
+    """
+    engines_block = config.get("engines")
+    legacy_keys = [key for key in ("engine", "model", "language") if key in config]
+
+    if engines_block is None:
+        return _parse_legacy_engine(config, default_voice), cast(str, config["engine"])
+
+    if legacy_keys:
+        msg = f"config.yaml declares both 'engines:' and the flat key(s) {', '.join(legacy_keys)}. Use one form or the other, not both."
+        raise ValueError(msg)
+
+    if not isinstance(engines_block, dict) or not engines_block:
+        msg = "'engines' in config.yaml must be a non-empty mapping of engine name to settings"
+        raise ValueError(msg)
+
+    declared_engines = cast(dict[str, object], engines_block)
+    engines: tuple[_EngineConfig, ...] = tuple(_parse_engine_block(kind, block, default_voice) for kind, block in declared_engines.items())
+
+    default_engine = config.get("default_engine")
+    if default_engine is None:
+        if len(engines) > 1:
+            msg = "'default_engine' in config.yaml is required when 'engines' declares more than one engine"
+            raise ValueError(msg)
+        default_engine = next(iter(declared_engines))
+    if not isinstance(default_engine, str):
+        msg = "'default_engine' in config.yaml must be a string"
+        raise ValueError(msg)
+    if all(engine.kind != default_engine for engine in engines):
+        declared = ", ".join(engine.kind for engine in engines)
+        msg = f"default_engine '{default_engine}' is not declared in 'engines'. Declared: {declared}"
+        raise ValueError(msg)
+
+    return engines, default_engine
+
+
+def _parse_server_config() -> _ServerConfig:
+    """Load and validate server settings from config.yaml. Fails fast on missing keys."""
+    config = load_config()
+
+    default_voice = _require(config, "default_voice")
+    if not isinstance(default_voice, str):
+        msg = "'default_voice' in config.yaml must be a string"
+        raise ValueError(msg)
+
+    engines, default_engine = _parse_engines(config, default_voice)
+
+    sample_rate = int(cast(int, _require(config, "sample_rate")))
+    _reject_per_engine_sample_rates(config, sample_rate)
+
     return _ServerConfig(
-        engine=engine,
-        language=language,
-        model_path=model_path,
-        sample_rate=int(cast(int, _require(config, "sample_rate"))),
+        engines=engines,
+        default_engine=default_engine,
+        sample_rate=sample_rate,
         default_voice=default_voice,
         simplify_punctuation=bool(config.get("simplify_punctuation")),
         save_wav=bool(_require(config, "save_wav")),
@@ -719,24 +1069,85 @@ def _parse_server_config() -> _ServerConfig:
     )
 
 
+def _discover_engine_voices(cfg: _ServerConfig) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Discover each declared engine's voices without loading any model.
+
+    Voice discovery reads only from the model directory, so every engine's
+    voices are known up front even though the models load lazily. The default
+    engine must work — a broken default is a broken server. A non-default
+    engine that cannot be read (typically its model was never downloaded) is
+    logged and marked unavailable, so declaring an engine can never take the
+    server down for everyone else.
+
+    Args:
+        cfg: Parsed server configuration.
+
+    Returns:
+        Voices per available engine, and errors per unavailable engine.
+
+    Raises:
+        Exception: Whatever the default engine's discovery raised.
+    """
+    voices_by_engine: dict[str, list[str]] = {}
+    errors: dict[str, str] = {}
+
+    for engine_cfg in cfg.engines:
+        is_default = engine_cfg.kind == cfg.default_engine
+        try:
+            engine = build_engine(engine_cfg.kind, engine_cfg.language)
+            voices_by_engine[engine_cfg.kind] = engine.discover_voices(Path(engine_cfg.model_path))
+        except Exception as exc:
+            if is_default:
+                raise
+            logger.warning(
+                "Engine '%s' is unavailable and will be rejected at /say: %s",
+                engine_cfg.kind,
+                exc,
+            )
+            errors[engine_cfg.kind] = str(exc)
+
+    return voices_by_engine, errors
+
+
 def _build_server_state(cfg: _ServerConfig) -> ServerState:
     """Assemble a ServerState from parsed config.
 
-    The MLX model is intentionally not loaded here. It is loaded by the audio
-    worker on its own thread (see server_audio_worker), because MLX GPU streams
-    are thread-local.
+    No MLX model is loaded here. Models are loaded lazily by the audio worker on
+    its own thread (see server_audio_worker), because MLX GPU streams are
+    thread-local; the default engine is loaded eagerly at startup so first-say
+    latency is unchanged.
     """
-    engine = build_engine(cfg.engine, cfg.language)
-    available_voices = engine.discover_voices(Path(cfg.model_path))
-    if cfg.default_voice not in available_voices:
-        msg = f"default_voice '{cfg.default_voice}' not found. Available: {', '.join(available_voices)}"
+    voices_by_engine, engine_errors = _discover_engine_voices(cfg)
+
+    default_voices = voices_by_engine[cfg.default_engine]
+    if cfg.default_voice not in default_voices:
+        msg = f"default_voice '{cfg.default_voice}' not found. Available: {', '.join(default_voices)}"
         raise ValueError(msg)
 
-    return ServerState(
-        engine=engine,
-        model=None,
-        model_path=cfg.model_path,
-        voices=available_voices,
+    for engine_cfg in cfg.engines:
+        engine_voices = voices_by_engine.get(engine_cfg.kind)
+        if engine_voices is not None and engine_cfg.default_voice not in engine_voices:
+            msg = (
+                f"default_voice '{engine_cfg.default_voice}' for engine '{engine_cfg.kind}' not found. "
+                f"Available: {', '.join(engine_voices)}"
+            )
+            raise ValueError(msg)
+
+    registry = EngineRegistry(
+        {
+            engine_cfg.kind: EngineSpec(
+                kind=engine_cfg.kind,
+                model_path=engine_cfg.model_path,
+                language=engine_cfg.language,
+            )
+            for engine_cfg in cfg.engines
+        }
+    )
+
+    state = ServerState(
+        registry=registry,
+        voices_by_engine=voices_by_engine,
+        default_engine=cfg.default_engine,
         default_voice=cfg.default_voice,
         sample_rate=cfg.sample_rate,
         lead_silence_ms=cfg.lead_silence_ms,
@@ -751,6 +1162,11 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         streaming_interval=cfg.streaming_interval,
         streaming_warmup_seconds=cfg.streaming_warmup_seconds,
     )
+
+    for kind, error in engine_errors.items():
+        state.mark_engine_failed(kind, error)
+
+    return state
 
 
 @asynccontextmanager
