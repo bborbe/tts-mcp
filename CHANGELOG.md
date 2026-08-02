@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - feat: `/voice on` and `/voice interview` now speak a one-line confirmation ("Okay. Voice mode activated.") via `mcp__tts__say`. v0.3.0 removed the activation handshake wholesale, which also removed any audible sign that the mode took — activation went completely silent and looked broken. The utterance is fire-and-forget: no "did you hear it?" gate, no `get_status` poll, no blocking. `/voice off` and `/voice status` stay silent; proof-of-audio still lives in `/tts-mcp:voice-selfcheck`.
+- docs: the speaking playbook now states that spoken output is **always English**, regardless of the language the user writes in, and that the input language never selects a different voice. The playbook previously covered voice, pacing, and markup but left output language implicit, so a German prompt could drift the spoken line into German while the on-screen text stayed English.
 
 ## v0.3.1
 

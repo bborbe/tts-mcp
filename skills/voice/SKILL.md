@@ -50,6 +50,7 @@ Caveats: in-flight messages are dropped across a restart; message IDs reset; one
 Speech is a different channel from the terminal text. When you call `mcp__tts__say`:
 
 - **Voice `ryan`, always.** (`ryan` is a Qwen3-TTS CustomVoice speaker. If the server runs `engine: voxtral`, its voices are Voxtral names such as `casual_male` instead — check `get_voices` when a voice is rejected.)
+- **English, always.** Speak English even when the user writes German (or any other language) — the input language never switches the spoken output. This matches the on-screen "English Only" rule; voice is not an exception to it. Do not switch voices to match an input language either. Proper nouns keep their native spelling; everything around them stays English.
 - **Lead with a throwaway word.** CoreAudio clips the first ~word of each utterance. Start every spoken message with a disposable lead token — `"Okay."`, `"So,"`, `"Right,"` — so the clip eats that, not the real first word. Never let a content word be first.
 - **Terse.** One idea per sentence. This is a nudge to attention, not a recital of the on-screen text — never read a whole reply aloud.
 - **No markup in speech.** No markdown, URLs, file paths, code, or backticks — describe them in words ("the controller Makefile", not "`Makefile.k8s`").
