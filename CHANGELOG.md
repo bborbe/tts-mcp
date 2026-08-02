@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- fix: `/voice` now declares `argument-hint` frontmatter, so the CLI shows `[on|narrate|interview|off|status|restart]` while typing. The skill has always taken args and the modes were listed in the description, but without the dedicated field the picker rendered no hint — leaving the six modes discoverable only by opening SKILL.md.
+- fix: the skill's `description` is now YAML-quoted. It ends with `Args: on | narrate | …`, and a bare `": "` inside an unquoted plain scalar is invalid YAML — `yaml.safe_load` rejected the whole frontmatter block with "mapping values are not allowed here". Claude Code's own parser is lenient enough to load it anyway, so the breakage was invisible in normal use, but any strict-YAML consumer (linter, audit tooling, generator) choked on the file. Present since the description first gained an `Args:` suffix.
+
 ## v0.5.0
 
 ### Added
