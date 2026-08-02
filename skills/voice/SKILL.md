@@ -54,7 +54,7 @@ Caveats: in-flight messages are dropped across a restart; message IDs reset; one
 
 Speech is a different channel from the terminal text. When you call `mcp__tts__say`:
 
-- **Voice `ryan`, always.** (`ryan` is a Qwen3-TTS CustomVoice speaker. If the server runs `engine: voxtral`, its voices are Voxtral names such as `casual_male` instead — check `get_voices` when a voice is rejected.)
+- **Voice `ryan`, always** — unless `/tts-mcp:engine` selected a non-qwen3 engine, which overrides this. (`ryan` is a Qwen3-TTS CustomVoice speaker and exists *only* on qwen3; voxtral's voices are separate names such as `casual_male`. Voice names do not overlap across engines and the server rejects a mismatch with a 400, so voice and engine must be chosen together — see the `engine` skill. Check `get_voices` when a voice is rejected.)
 - **English, always.** Speak English even when the user writes German (or any other language) — the input language never switches the spoken output. This matches the on-screen "English Only" rule; voice is not an exception to it. Do not switch voices to match an input language either. Proper nouns keep their native spelling; everything around them stays English.
 - **Lead with a throwaway word.** CoreAudio clips the first ~word of each utterance. Start every spoken message with a disposable lead token — `"Okay."`, `"So,"`, `"Right,"` — so the clip eats that, not the real first word. Never let a content word be first.
 - **Terse.** One idea per sentence. This is a nudge to attention, not a recital of the on-screen text — never read a whole reply aloud.
@@ -92,5 +92,6 @@ The screen is the detail channel; voice is the attention channel. A `say()` cost
 ## Persistence note
 
 - Session toggle **and volume policy** → this skill (`on` / `narrate` / `interview` / `off`). Nothing else owns this.
+- Which engine (and therefore which voice) → `/tts-mcp:engine`. That is the other genuinely session-scoped setting: the server holds every declared engine at once, and each `say` names the one to use.
 - No always-on default. Voice stays silent until `/voice` is invoked — deliberate, so a session is never noisy without someone asking for it. If you want a persistent default back, add a rule to `~/.claude/CLAUDE.md` naming the mode, but then this file stops being the single source of truth.
 - Mechanical enforcement (e.g. a hook that always speaks on Stop) → `settings.json`; use the `update-config` skill if you want that.
