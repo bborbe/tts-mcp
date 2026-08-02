@@ -1,6 +1,7 @@
 ---
 name: voice
-description: Manage TTS voice mode for the current session and apply the spoken-output playbook. Use when the user types /voice, asks to turn voice on/off, wants answers spoken aloud (narrate mode) or questions read aloud (interview mode), restart/fix the TTS server after audio goes silent (e.g. switching to AirPods), or asks how much the voice should say. Sole authority on spoken-output volume — no always-on rule competes with it. Activation speaks a one-line confirmation but runs no selftest — use /tts-mcp:voice-selfcheck to verify the audio path. Args: on | narrate | interview | off | status | restart.
+description: 'Manage TTS voice mode for the current session and apply the spoken-output playbook. Use when the user types /voice, asks to turn voice on/off, wants answers spoken aloud (narrate mode) or questions read aloud (interview mode), restart/fix the TTS server after audio goes silent (e.g. switching to AirPods), or asks how much the voice should say. Sole authority on spoken-output volume — no always-on rule competes with it. Activation speaks a one-line confirmation but runs no selftest — use /tts-mcp:voice-selfcheck to verify the audio path. Args: on | narrate | interview | off | status | restart.'
+argument-hint: "[on|narrate|interview|off|status|restart]"
 ---
 
 ## What this does
