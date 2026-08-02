@@ -20,7 +20,19 @@ from src.server import (
     router,
     server_audio_worker,
 )
-from src.tts import AudioPlayer, VoxtralEngine
+from src.tts import (
+    QWEN3,
+    VOXTRAL,
+    AudioPlayer,
+    EngineRegistry,
+    EngineSpec,
+    LoadedEngine,
+    VoxtralEngine,
+)
+
+DEFAULT_SPECS = {
+    VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="test-model-path", language=None),
+}
 
 
 def _make_state(
@@ -40,23 +52,32 @@ def _make_state(
     stream: bool = False,
     streaming_interval: float = 1.0,
     streaming_warmup_seconds: float = 2.0,
+    registry: EngineRegistry | None = None,
+    voices_by_engine: dict[str, list[str]] | None = None,
+    default_engine: str = VOXTRAL,
 ) -> ServerState:
     """Create a ServerState for testing.
 
-    By default a mock model is pre-loaded (preload_model=True). Pass
-    preload_model=False to leave state.model as None so the worker loads it
-    on its own thread, mirroring the production code path.
+    By default a single voxtral engine is declared with a mock model already in
+    the registry cache (preload_model=True). Pass preload_model=False to leave
+    the cache empty so the worker loads it on its own thread, mirroring the
+    production code path. Pass a registry to declare multiple engines.
     """
-    model = MagicMock() if preload_model else None
     if voices is None:
         voices = ["casual_female", "casual_male"]
+    if voices_by_engine is None:
+        voices_by_engine = {default_engine: voices}
+    if registry is None:
+        specs = {VOXTRAL: EngineSpec(kind=VOXTRAL, model_path=model_path, language=None)}
+        registry = EngineRegistry(specs, loader=lambda _path: MagicMock())
+    if preload_model and not registry.is_loaded(default_engine):
+        registry.preload(default_engine, LoadedEngine(engine=VoxtralEngine(), model=MagicMock()))
     if meter is None:
         meter = pyln.Meter(float(sample_rate))
-    return ServerState(
-        engine=VoxtralEngine(),
-        model=model,
-        model_path=model_path,
-        voices=voices,
+    state = ServerState(
+        registry=registry,
+        voices_by_engine=voices_by_engine,
+        default_engine=default_engine,
         default_voice=default_voice,
         sample_rate=sample_rate,
         lead_silence_ms=lead_silence_ms,
@@ -71,6 +92,15 @@ def _make_state(
         streaming_interval=streaming_interval,
         streaming_warmup_seconds=streaming_warmup_seconds,
     )
+    if preload_model:
+        # Mirror what the worker reports after loading, so /voices sees it.
+        state.mark_engine_loaded(default_engine)
+    return state
+
+
+def _model_of(state: ServerState, engine: str | None = None) -> Any:
+    """Return the mock model cached for an engine, for stubbing generate()."""
+    return cast(Any, state.registry.get(engine or state.default_engine).model)
 
 
 def _make_app(state: ServerState) -> FastAPI:
@@ -163,6 +193,168 @@ class TestVoices:
         data = response.json()
         assert data["voices"] == ["casual_female", "neutral_male"]
         assert data["default_voice"] == "casual_female"
+
+
+def _multi_engine_state(
+    loader: Any = None,
+    preload_default: bool = True,
+    stream: bool = False,
+) -> ServerState:
+    """State declaring both engines, with only the default preloaded."""
+    specs = {
+        VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="voxtral-path", language=None),
+        QWEN3: EngineSpec(kind=QWEN3, model_path="qwen3-path", language="English"),
+    }
+    registry = EngineRegistry(specs, loader=loader or (lambda _path: MagicMock()))
+    return _make_state(
+        registry=registry,
+        preload_model=preload_default,
+        voices_by_engine={
+            VOXTRAL: ["casual_female", "casual_male"],
+            QWEN3: ["ryan", "serena"],
+        },
+        default_engine=VOXTRAL,
+        default_voice="casual_female",
+        stream=stream,
+    )
+
+
+class TestMultiEngineVoices:
+    """Tests for GET /voices with more than one engine declared."""
+
+    def test_flat_voices_are_the_union(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        data = client.get("/voices").json()
+
+        assert data["voices"] == ["ryan", "serena", "casual_female", "casual_male"]
+        assert data["default_voice"] == "casual_female"
+        assert data["default_engine"] == VOXTRAL
+
+    def test_engines_are_grouped(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        engines = {entry["engine"]: entry for entry in client.get("/voices").json()["engines"]}
+
+        assert engines[QWEN3]["voices"] == ["ryan", "serena"]
+        assert engines[VOXTRAL]["voices"] == ["casual_female", "casual_male"]
+        assert engines[QWEN3]["language"] == "English"
+        assert engines[VOXTRAL]["language"] is None
+
+    def test_only_qwen3_supports_instruct(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        engines = {entry["engine"]: entry for entry in client.get("/voices").json()["engines"]}
+
+        assert engines[QWEN3]["supports_instruct"] is True
+        assert engines[VOXTRAL]["supports_instruct"] is False
+
+    def test_reports_which_engines_are_resident(self) -> None:
+        state = _multi_engine_state()
+        client = TestClient(_make_app(state))
+
+        engines = {entry["engine"]: entry for entry in client.get("/voices").json()["engines"]}
+        assert engines[VOXTRAL]["loaded"] is True
+        assert engines[QWEN3]["loaded"] is False
+
+        state.mark_engine_loaded(QWEN3)
+
+        engines = {entry["engine"]: entry for entry in client.get("/voices").json()["engines"]}
+        assert engines[QWEN3]["loaded"] is True
+
+    def test_unavailable_engine_is_reported(self) -> None:
+        state = _multi_engine_state()
+        state.voices_by_engine.pop(QWEN3)
+        state.mark_engine_failed(QWEN3, "model directory missing")
+        client = TestClient(_make_app(state))
+
+        engines = {entry["engine"]: entry for entry in client.get("/voices").json()["engines"]}
+
+        assert engines[QWEN3]["available"] is False
+        assert engines[QWEN3]["error"] == "model directory missing"
+        assert "ryan" not in client.get("/voices").json()["voices"]
+
+
+class TestSayEngineSelection:
+    """Tests for choosing an engine on POST /say."""
+
+    def test_omitted_engine_uses_the_default(self) -> None:
+        state = _multi_engine_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello"})
+
+        assert response.status_code == 202
+        assert state.work_queue.get_nowait().engine == VOXTRAL
+
+    def test_explicit_engine_is_honored(self) -> None:
+        state = _multi_engine_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "ryan", "engine": QWEN3})
+
+        assert response.status_code == 202
+        item = state.work_queue.get_nowait()
+        assert item.engine == QWEN3
+        assert item.voice == "ryan"
+
+    def test_unknown_engine_returns_400(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        response = client.post("/say", json={"text": "Hello", "engine": "piper"})
+
+        assert response.status_code == 400
+        assert "Unknown engine 'piper'" in response.json()["detail"]
+
+    def test_unavailable_engine_returns_400(self) -> None:
+        state = _multi_engine_state()
+        state.voices_by_engine.pop(QWEN3)
+        state.mark_engine_failed(QWEN3, "model directory missing")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "ryan", "engine": QWEN3})
+
+        assert response.status_code == 400
+        assert "unavailable" in response.json()["detail"]
+        assert "model directory missing" in response.json()["detail"]
+
+    def test_voice_from_another_engine_returns_400(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "ryan", "engine": VOXTRAL})
+
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "not available on engine 'voxtral'" in detail
+        assert "casual_female" in detail
+
+    def test_instruct_is_rejected_for_voxtral_up_front(self) -> None:
+        """The engine raises on instruct anyway, but only inside the worker —
+        long after the caller got its 202 and stopped looking.
+        """
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        response = client.post("/say", json={"text": "Hello", "instruct": "Happy.", "engine": VOXTRAL})
+
+        assert response.status_code == 400
+        assert "'instruct' is not supported by the voxtral engine" in response.json()["detail"]
+
+    def test_instruct_is_accepted_for_qwen3(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        response = client.post(
+            "/say",
+            json={"text": "Hello", "voice": "ryan", "engine": QWEN3, "instruct": "Happy."},
+        )
+
+        assert response.status_code == 202
+
+    def test_status_reports_the_engine(self) -> None:
+        client = TestClient(_make_app(_multi_engine_state()))
+
+        message_id = client.post("/say", json={"text": "Hello", "voice": "ryan", "engine": QWEN3}).json()["message_id"]
+
+        assert client.get(f"/status/{message_id}").json()["engine"] == QWEN3
 
 
 class TestMessageId:
@@ -501,7 +693,7 @@ class TestServerAudioWorker:
         state = _make_state()
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
 
         msg_id = "msg_test_001"
@@ -514,7 +706,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -530,7 +722,7 @@ class TestServerAudioWorker:
         state = _make_state(stream=True)
         c1 = MagicMock(audio=np.ones(100, dtype=np.float32))
         c2 = MagicMock(audio=np.ones(200, dtype=np.float32))
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [c1, c2]
 
         msg_id = "msg_stream_001"
@@ -543,7 +735,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -564,7 +756,7 @@ class TestServerAudioWorker:
         state = _make_state()
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
 
         for i in range(3):
@@ -578,7 +770,7 @@ class TestServerAudioWorker:
                     error=None,
                     completed_at=None,
                 )
-            state.work_queue.put(WorkItem(message_id=msg_id, text=f"Message {i}", voice="casual_female", instruct=None))
+            state.work_queue.put(WorkItem(message_id=msg_id, text=f"Message {i}", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -593,7 +785,7 @@ class TestServerAudioWorker:
 
     def test_handles_generation_error(self) -> None:
         state = _make_state()
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.side_effect = RuntimeError("Model crashed")
 
         msg_id = "msg_err_001"
@@ -606,7 +798,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Fail", voice="casual_female", instruct=None))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Fail", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -629,14 +821,14 @@ class TestServerAudioWorker:
         t.join(timeout=5)
 
         assert not t.is_alive()
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.assert_not_called()
 
     def test_handles_playback_error(self) -> None:
         state = _make_state()
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
         _ImmediateAudioPlayer.playback_error = RuntimeError("Audio device error")
 
@@ -650,7 +842,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -680,7 +872,7 @@ class TestServerAudioWorker:
         state = _make_state(save_wav=False, sample_rate=1000, lead_silence_ms=200)
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(4, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
 
         first_msg = "msg_stream_lost"
@@ -695,7 +887,7 @@ class TestServerAudioWorker:
                     error=None,
                     completed_at=None,
                 )
-            state.work_queue.put(WorkItem(message_id=message_id, text=text, voice="casual_female", instruct=None))
+            state.work_queue.put(WorkItem(message_id=message_id, text=text, voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -718,8 +910,7 @@ class TestServerAudioWorker:
             assert "output stream terminated" in state.statuses[first_msg].error
             assert state.statuses[second_msg].status == "completed"
 
-    @patch("src.server.load")
-    def test_loads_model_on_worker_thread_when_not_preloaded(self, mock_load: MagicMock) -> None:
+    def test_loads_model_on_worker_thread_when_not_preloaded(self) -> None:
         """Regression: the model must be loaded on the same thread that calls
         generate, because MLX GPU streams are thread-local. Loading on the main
         thread and generating on the worker thread raised
@@ -727,6 +918,7 @@ class TestServerAudioWorker:
         """
         load_thread_id: dict[str, int] = {}
         generate_thread_id: dict[str, int] = {}
+        load_calls: list[str] = []
 
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
@@ -741,11 +933,11 @@ class TestServerAudioWorker:
 
         def fake_load(model_path: str) -> MagicMock:
             load_thread_id["id"] = threading.get_ident()
+            load_calls.append(model_path)
             return mock_model
 
-        mock_load.side_effect = fake_load
-
-        state = _make_state(preload_model=False)
+        registry = EngineRegistry(dict(DEFAULT_SPECS), loader=fake_load)
+        state = _make_state(preload_model=False, registry=registry)
 
         msg_id = "msg_thread_001"
         with state.status_lock:
@@ -757,7 +949,7 @@ class TestServerAudioWorker:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -765,21 +957,24 @@ class TestServerAudioWorker:
         t.join(timeout=5)
 
         assert not t.is_alive()
-        mock_load.assert_called_once_with("test-model-path")
+        assert load_calls == ["test-model-path"]
         assert load_thread_id["id"] == t.ident
         assert generate_thread_id["id"] == t.ident
         assert load_thread_id["id"] == generate_thread_id["id"]
         with state.status_lock:
             assert state.statuses[msg_id].status == "completed"
 
-    @patch("src.server.load")
-    def test_reports_model_load_failure_via_ready_queue(self, mock_load: MagicMock) -> None:
+    def test_reports_model_load_failure_via_ready_queue(self) -> None:
         """A model-load failure on the worker thread is propagated through
         ready_queue so the main thread (lifespan) can surface it on startup.
         """
-        mock_load.side_effect = RuntimeError("model load boom")
 
-        state = _make_state(preload_model=False)
+        def failing_load(_model_path: str) -> MagicMock:
+            msg = "model load boom"
+            raise RuntimeError(msg)
+
+        registry = EngineRegistry(dict(DEFAULT_SPECS), loader=failing_load)
+        state = _make_state(preload_model=False, registry=registry)
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -806,6 +1001,166 @@ class TestServerAudioWorker:
         assert state.ready_queue.get(timeout=1) is None
 
 
+def _queue_item(state: ServerState, message_id: str, engine: str, voice: str) -> None:
+    """Register a status and enqueue one work item for the worker."""
+    with state.status_lock:
+        state.statuses[message_id] = MessageStatus(
+            message_id=message_id,
+            status="queued",
+            text="Hello",
+            audio_file=None,
+            error=None,
+            completed_at=None,
+            engine=engine,
+        )
+    state.work_queue.put(WorkItem(message_id=message_id, text="Hello", voice=voice, instruct=None, engine=engine))
+
+
+def _run_worker(state: ServerState) -> threading.Thread:
+    """Run the worker to completion after a sentinel has been queued."""
+    state.work_queue.put(None)
+    t = threading.Thread(target=server_audio_worker, args=(state,))
+    t.start()
+    t.join(timeout=5)
+    return t
+
+
+class TestLazyEngineLoading:
+    """Tests for loading non-default engines on first use."""
+
+    def test_startup_loads_only_the_default_engine(self) -> None:
+        load_calls: list[str] = []
+
+        def loader(model_path: str) -> MagicMock:
+            load_calls.append(model_path)
+            model = MagicMock()
+            model.generate.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            return model
+
+        state = _multi_engine_state(loader=loader, preload_default=False)
+        _run_worker(state)
+
+        assert load_calls == ["voxtral-path"]
+        assert state.is_engine_loaded(VOXTRAL) is True
+        assert state.is_engine_loaded(QWEN3) is False
+
+    def test_first_item_for_another_engine_loads_it(self) -> None:
+        load_calls: list[str] = []
+
+        def loader(model_path: str) -> MagicMock:
+            load_calls.append(model_path)
+            model = MagicMock()
+            model.generate_custom_voice.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            model.generate.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            return model
+
+        state = _multi_engine_state(loader=loader, preload_default=False)
+        _queue_item(state, "msg_lazy_001", QWEN3, "ryan")
+        _run_worker(state)
+
+        assert load_calls == ["voxtral-path", "qwen3-path"]
+        assert state.is_engine_loaded(QWEN3) is True
+        with state.status_lock:
+            assert state.statuses["msg_lazy_001"].status == "completed"
+
+    def test_second_item_for_the_same_engine_does_not_reload(self) -> None:
+        load_calls: list[str] = []
+
+        def loader(model_path: str) -> MagicMock:
+            load_calls.append(model_path)
+            model = MagicMock()
+            model.generate_custom_voice.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            model.generate.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            return model
+
+        state = _multi_engine_state(loader=loader, preload_default=False)
+        _queue_item(state, "msg_lazy_001", QWEN3, "ryan")
+        _queue_item(state, "msg_lazy_002", QWEN3, "serena")
+        _run_worker(state)
+
+        assert load_calls == ["voxtral-path", "qwen3-path"]
+
+    def test_failed_lazy_load_keeps_the_worker_serving_the_default(self) -> None:
+        """Regression: a bad non-default engine must not brick the worker.
+
+        The startup load path signals ready_queue and kills the worker on
+        failure; reusing it for lazy loads would let one unreachable engine
+        take down an already-working default for every session.
+        """
+
+        def loader(model_path: str) -> MagicMock:
+            if model_path == "qwen3-path":
+                msg = "qwen3 model missing"
+                raise RuntimeError(msg)
+            model = MagicMock()
+            model.generate.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            return model
+
+        state = _multi_engine_state(loader=loader, preload_default=False)
+        _queue_item(state, "msg_bad_001", QWEN3, "ryan")
+        _queue_item(state, "msg_good_002", VOXTRAL, "casual_female")
+        t = _run_worker(state)
+
+        assert not t.is_alive()
+        with state.status_lock:
+            assert state.statuses["msg_bad_001"].status == "error"
+            assert "qwen3 model missing" in (state.statuses["msg_bad_001"].error or "")
+            assert state.statuses["msg_good_002"].status == "completed"
+        assert state.engine_error(QWEN3) is not None
+
+    def test_failed_lazy_load_is_not_retried(self) -> None:
+        load_calls: list[str] = []
+
+        def loader(model_path: str) -> MagicMock:
+            load_calls.append(model_path)
+            if model_path == "qwen3-path":
+                msg = "qwen3 model missing"
+                raise RuntimeError(msg)
+            return MagicMock()
+
+        state = _multi_engine_state(loader=loader, preload_default=False)
+        _queue_item(state, "msg_bad_001", QWEN3, "ryan")
+        _queue_item(state, "msg_bad_002", QWEN3, "serena")
+        _run_worker(state)
+
+        assert load_calls == ["voxtral-path", "qwen3-path"]
+
+    def test_status_is_loading_while_the_model_loads(self) -> None:
+        release = threading.Event()
+        observed: list[str] = []
+
+        def loader(model_path: str) -> MagicMock:
+            if model_path == "qwen3-path":
+                release.wait(timeout=5)
+            model = MagicMock()
+            model.generate_custom_voice.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            model.generate.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+            return model
+
+        state = _multi_engine_state(loader=loader, preload_default=False)
+        _queue_item(state, "msg_slow_001", QWEN3, "ryan")
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with state.status_lock:
+                current = state.statuses["msg_slow_001"].status
+            if current == "loading":
+                observed.append(current)
+                break
+            time.sleep(0.01)
+
+        release.set()
+        t.join(timeout=5)
+
+        assert observed == ["loading"]
+        with state.status_lock:
+            assert state.statuses["msg_slow_001"].status == "completed"
+
+
 class TestSaveWavDisabled:
     """Tests for save_wav=False behavior."""
 
@@ -813,7 +1168,7 @@ class TestSaveWavDisabled:
         state = _make_state(save_wav=False)
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
 
         msg_id = "msg_nosave_001"
@@ -826,7 +1181,7 @@ class TestSaveWavDisabled:
                 error=None,
                 completed_at=None,
             )
-        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None))
+        state.work_queue.put(WorkItem(message_id=msg_id, text="Hello", voice="casual_female", instruct=None, engine=VOXTRAL))
         state.work_queue.put(None)
 
         t = threading.Thread(target=server_audio_worker, args=(state,))
@@ -846,7 +1201,7 @@ class TestConcurrentSay:
         state = _make_state()
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
 
         app = _make_app(state)
@@ -891,7 +1246,7 @@ class TestConcurrentSay:
         state = _make_state()
         mock_chunk = MagicMock()
         mock_chunk.audio = np.ones(100, dtype=np.float32)
-        model = cast(Any, state.model)
+        model = _model_of(state)
         model.generate.return_value = [mock_chunk]
 
         app = _make_app(state)

@@ -46,6 +46,33 @@ class TestLoadCliConfig:
         assert cfg.streaming_warmup_seconds == 2.0
         assert cfg.normalization.enabled is True
 
+    def test_reads_the_engines_mapping_via_default_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Migrating config.yaml to the server's mapping form must not break the CLI."""
+        config = _base_cli_config()
+        del config["engine"]
+        config["default_engine"] = "qwen3"
+        config["engines"] = {
+            "qwen3": {"model": "/models/qwen3", "language": "English"},
+            "voxtral": {"model": "/models/voxtral"},
+        }
+        monkeypatch.setattr("src.main.load_config", lambda: config)
+
+        cfg = load_cli_config()
+
+        assert cfg.engine == "qwen3"
+        assert cfg.language == "English"
+
+    def test_engines_mapping_without_default_engine_uses_the_only_entry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_cli_config()
+        del config["engine"]
+        config["engines"] = {"voxtral": {"model": "/models/voxtral"}}
+        monkeypatch.setattr("src.main.load_config", lambda: config)
+
+        cfg = load_cli_config()
+
+        assert cfg.engine == "voxtral"
+        assert cfg.language is None
+
     def test_raises_when_lead_silence_ms_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = _base_cli_config()
         del config["lead_silence_ms"]

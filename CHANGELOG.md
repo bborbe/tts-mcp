@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- feat: per-request engine selection with lazy model loading. `config.yaml` gains an optional `engines:` mapping (with `default_engine:`) declaring several engines at once, and `POST /say` plus the `say` MCP tool gain an `engine` field. Only the default engine is loaded at startup; another engine's model loads the first time a request names it, so a config declaring both families costs one model of memory until someone actually uses the second. Previously the engine was fixed by a single `engine:` key bound at process start, and one server process serves every client — so choosing a backend meant editing config and restarting, dropping in-flight audio for everyone.
+- feat: `GET /voices` reports per-engine detail alongside the existing flat `voices`/`default_voice` fields — each engine's voices, language, whether it supports `instruct`, whether its model is resident, and whether it is available at all. The flat `voices` list is now the union across available engines.
+- feat: new `loading` message status, set while a request waits on its engine's model. Previously such a request reported `playing` while silent, since the status flipped at dequeue rather than at first audio.
+
+### Changed
+
+- feat: `instruct` paired with an engine that does not support it is now rejected with a 400 at request time. It previously returned 202 and failed inside the worker — after the caller had stopped looking — and would pointlessly load the model first.
+- fix: a failed lazy engine load no longer kills the audio worker. The startup load path signals `ready_queue` and stops the worker on failure, which is right for a broken default engine but would have let one unreachable non-default engine brick playback for every session. The two paths are now distinct: lazy failures are recorded on the item and the engine, and the worker keeps serving.
+- fix: a failed model load is cached rather than retried. Repeating a load that takes ~20 seconds to fail on every request is worse than surfacing the original error immediately; recovery is a server restart.
+
+### Notes
+
+- The single-engine `engine:`/`model:`/`language:` form keeps working unchanged. Declaring both forms at once is an error rather than one silently taking precedence.
+- No eviction: resident models are never dropped. Streaming hands a live generator to the playback path, so releasing a model mid-stream is a use-after-free-shaped bug, and freeing MLX buffers from the wrong thread reintroduces the thread-affinity problem the single-worker design exists to avoid.
+- `sample_rate` stays global. A per-engine value is accepted only if it matches; the output stream and loudness meter are built once per worker, so a differing rate would pitch-shift audio and mis-meter loudness.
+
 ## v0.5.1
 
 ### Fixed

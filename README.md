@@ -12,7 +12,7 @@ Local text-to-speech on Apple Silicon via MLX, with real-time streaming playback
 | Interactive CLI | Terminal interface with model/voice selection, ESC to quit, and backspace support |
 | REST API Server | FastAPI server with queued sequential playback and message status tracking |
 | MCP Server | Ready-to-use MCP bridge for Claude Code and Claude Desktop integration |
-| Pluggable Engines | `engine: voxtral` or `engine: qwen3` in config.yaml selects the model family; both stream |
+| Pluggable Engines | `engine: voxtral` or `engine: qwen3` in config.yaml selects the model family; both stream. Declare several via `engines:` and pick one per request — models load lazily, so unused engines cost nothing |
 | Multi-Voice | Voxtral: 20 voices across 9 languages. Qwen3: 9 named speakers across 10 languages |
 | Emotion Control | Qwen3 accepts a free-text `instruct` per request (e.g. "Very happy and excited.") |
 | Multi-Model | Voxtral 4B in 4-bit / 6-bit / bf16; Qwen3-TTS 1.7B CustomVoice in 4-bit / 8-bit |
@@ -179,9 +179,11 @@ port: 12000
 
 | Key | Description |
 |-----|-------------|
-| `engine` | **Required.** Model family: `voxtral` or `qwen3`. No default — a missing value is an error |
+| `engine` | **Required** in the single-engine form. Model family: `voxtral` or `qwen3`. No default — a missing value is an error. Mutually exclusive with `engines` |
 | `language` | Required by `qwen3` (e.g. `English`, `German`); rejected by `voxtral` |
 | `model` | Path to the downloaded MLX model directory |
+| `engines` | Alternative to `engine`/`model`/`language`: declare several engines and pick one per request (see below) |
+| `default_engine` | Engine used by requests that name none. Required when `engines` declares more than one |
 | `models_dir` | Base directory containing model subdirectories (for CLI model selection) |
 | `sample_rate` | Audio sample rate in Hz (24000 for Voxtral) |
 | `default_voice` | Default voice for server requests without a voice override |
@@ -196,6 +198,49 @@ port: 12000
 | `min_duration_seconds` | Utterances shorter than this are passed through unchanged (LUFS gating needs ~0.4s) |
 | `host` | Server listen address |
 | `port` | Server listen port |
+
+### Multiple engines
+
+The `engine:`/`model:`/`language:` keys above declare exactly one engine. To make both families available and let each
+request pick, replace them with an `engines:` mapping:
+
+```yaml
+default_engine: qwen3
+engines:
+  qwen3:
+    model: /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
+    language: German
+    default_voice: ryan
+  voxtral:
+    model: /path/to/Voxtral-4B-TTS-2603-mlx-6bit
+    default_voice: casual_male
+sample_rate: 24000   # global — every engine must agree
+# ... remaining audio keys unchanged
+```
+
+Callers then pass `engine` to `POST /say` (or the `say` MCP tool). Omitting it uses `default_engine`, so existing
+callers are unaffected. There is no inference from the voice name: a voice must belong to the engine named in the
+request, and `GET /voices` groups voices per engine so you can see which is which.
+
+**Models load lazily.** Only `default_engine` is loaded at startup. Another engine's model is loaded the first time a
+request asks for it — so if every caller uses the default, exactly one model is ever resident. That first request waits
+on the load (~15-20s) and reports `status: loading` until audio starts; later requests are immediate.
+
+Consequences worth knowing:
+
+- **Memory is the cost of caching.** Each resident model is several GB of unified memory, and nothing is ever evicted.
+  Declaring N engines can cost N models of RAM if all of them get used. Restart the server to reclaim.
+- **A slow load blocks the queue.** One worker thread serves everything, so a request that triggers a load delays
+  anything queued behind it.
+- **`sample_rate` is global.** The output stream and loudness meter are built once, so a per-engine `sample_rate` is
+  accepted only if it equals the global one; anything else is rejected at startup rather than silently pitch-shifting.
+- **A missing non-default model does not break the server.** It is logged, reported as `available: false` by
+  `GET /voices`, and rejected with a 400 by `/say`. Only the default engine hard-fails at startup.
+- **A failed load is not retried.** The error is cached and returned immediately to later requests; recovery is a
+  server restart.
+
+The flat single-engine form keeps working unchanged — declaring both forms at once is an error rather than one
+silently winning.
 
 ### Streaming playback
 
@@ -256,9 +301,9 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Liveness check |
-| GET | `/voices` | List available voices and default voice |
+| GET | `/voices` | List available voices and default voice, plus per-engine grouping and load state |
 | POST | `/say` | Queue text for synthesis and playback (returns message ID) |
-| GET | `/status/{message_id}` | Check status of a queued/playing/completed message |
+| GET | `/status/{message_id}` | Check status of a queued/loading/playing/completed message |
 
 ### POST /say
 
@@ -266,11 +311,17 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
 {
   "text": "Hello, this is a test.",
   "voice": "casual_female",
-  "instruct": "Very happy and excited."
+  "instruct": "Very happy and excited.",
+  "engine": "qwen3"
 }
 ```
 
-`instruct` is optional and only accepted by the `qwen3` engine; the `voxtral` engine fails the request rather than ignoring it.
+`engine` is optional and defaults to `default_engine`. The voice must belong to that engine — there is no inference
+from the voice name. The first request for an engine whose model is not yet resident waits on the load and reports
+`status: loading` until audio starts.
+
+`instruct` is optional and only accepted by the `qwen3` engine; pairing it with another engine is rejected with a 400
+at request time rather than failing later inside the worker.
 
 Returns `202 Accepted` with a message ID and queue position. Audio plays through the server's speakers.
 
