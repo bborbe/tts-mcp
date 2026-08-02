@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- feat: `narrate` mode — `/voice narrate` speaks a 1–3 sentence gist of every substantive answer on top of the attention signals `on` already covers. Fills the gap that made `/voice on … explain X` land the explanation on screen only: the user turned voice on precisely because they wanted the answer in their ears. Never speaks the reply verbatim; the screen still carries the detail.
+
+### Changed
+
+- feat: the skill is now the **sole authority on spoken-output volume**. The rationale and prohibitions previously carried by an always-on `~/.claude/CLAUDE.md` rule (screen is the detail channel, voice the attention channel; ~150 wpm playback; no acks, no tool-call chatter, no reading code aloud) now live in a `## How much to speak` section with a per-mode capability table. Two sources of truth meant the memory rule silently outranked whatever mode the user had just selected.
+- docs: voice is off until `/voice` is invoked — there is no always-on default any more. Documented in the persistence note, along with how to reinstate one and what that costs.
+
 ## v0.4.0
 
 ### Changed
