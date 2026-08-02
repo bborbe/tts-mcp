@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `/voice on` and `/voice interview` now speak a one-line confirmation ("Okay. Voice mode activated.") via `mcp__tts__say`. v0.3.0 removed the activation handshake wholesale, which also removed any audible sign that the mode took — activation went completely silent and looked broken. The utterance is fire-and-forget: no "did you hear it?" gate, no `get_status` poll, no blocking. `/voice off` and `/voice status` stay silent; proof-of-audio still lives in `/tts-mcp:voice-selfcheck`.
+- feat: `/voice on` and `/voice interview` now speak a one-line confirmation ("Okay. Voice mode activated.") via `mcp__tts__say`. v0.3.0 removed the activation handshake wholesale, which also removed any audible sign that the mode took — activation went completely silent and looked broken. The utterance is fire-and-forget: no "did you hear it?" gate, no `get_status` poll, no blocking. `/voice off` and `/voice status` stay silent; proof-of-audio still lives in `/tts-mcp:voice-selfcheck`.
 
 ## v0.3.1
 
