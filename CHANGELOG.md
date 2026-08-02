@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- `/voice on` and `/voice interview` now speak a one-line confirmation ("Okay. Voice mode activated.") via `mcp__tts__say`. v0.3.0 removed the activation handshake wholesale, which also removed any audible sign that the mode took — activation went completely silent and looked broken. The utterance is fire-and-forget: no "did you hear it?" gate, no `get_status` poll, no blocking. `/voice off` and `/voice status` stay silent; proof-of-audio still lives in `/tts-mcp:voice-selfcheck`.
+
 ## v0.3.1
 
 - chore: opt this fork into auto-release via `release.allowFork` in `.maintainer.yaml`. `github-release-watcher` previously dropped forked repos during repo listing — upstream of the `.maintainer.yaml` trust gate — so this repo's `autoRelease: true` was never read and v0.3.0 had to be tagged by hand. Fixed in watcher v0.3.1 (`maintainer` v0.48.0 adds the `allowFork` field, `github-releaser-agent` v0.3.2 accepts it under strict config parsing); forks now reach the filter chain and release only with this explicit opt-in. This release is itself the end-to-end proof: it is the first tag on this repo cut automatically rather than by hand.
