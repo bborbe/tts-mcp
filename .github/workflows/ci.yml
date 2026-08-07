@@ -5,6 +5,10 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # Allows re-running CI by hand. Without this, a run orphaned by a platform
+  # incident cannot be retried at all: `gh run rerun` rejects a non-completed
+  # run, and the only way to get a fresh result is an otherwise pointless commit.
+  workflow_dispatch:
 
 jobs:
   test:
