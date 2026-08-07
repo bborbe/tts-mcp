@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- chore: CI can now be triggered by hand via `workflow_dispatch`. Previously the workflow ran only on `push` and `pull_request`, so a run orphaned by a GitHub Actions incident could not be retried at all — `gh run rerun` rejects a run that is not `completed`, and the stuck run reported `queued` indefinitely while `gh run cancel` claimed it was already complete. The only remaining way to get a fresh result on `main` was an otherwise pointless commit.
+
 ## v0.6.0
 
 ### Added
