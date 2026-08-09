@@ -57,6 +57,20 @@ Speech is a different channel from the terminal text. When you call `mcp__tts__s
 - **Voice `ryan`, always** — unless `/tts-mcp:engine` selected a non-qwen3 engine, which overrides this. (`ryan` is a Qwen3-TTS CustomVoice speaker and exists *only* on qwen3; voxtral's voices are separate names such as `casual_male`. Voice names do not overlap across engines and the server rejects a mismatch with a 400, so voice and engine must be chosen together — see the `engine` skill. Check `get_voices` when a voice is rejected.)
 - **English, always.** Speak English even when the user writes German (or any other language) — the input language never switches the spoken output. This matches the on-screen "English Only" rule; voice is not an exception to it. Do not switch voices to match an input language either. Proper nouns keep their native spelling; everything around them stays English.
 - **Lead with a throwaway word.** CoreAudio clips the first ~word of each utterance. Start every spoken message with a disposable lead token — `"Okay."`, `"So,"`, `"Right,"` — so the clip eats that, not the real first word. Never let a content word be first.
+- **Name the subject, every utterance.** One server serves every Claude session from a shared queue, so with several sessions open their speech interleaves with nothing to tell them apart — an unlabeled utterance is noise. Every spoken message carries a short tag naming what it is about:
+
+    ```
+    throwaway lead + tag + content
+    "Okay. ORB DE40 — closing posted for next week."
+    "So, vault UI — build failed."
+    ```
+
+    - **Tag source, in order:** the session's anchor task (the `📌 Task:` line in the closer panel) → its parent goal → the repo or service being worked on. Never invent one.
+    - **Shorten it.** 2–4 words, the distinctive part only — `"ORB DE40"`, not `"ORB DE40 W32 Sunday Review and Extend Closing to W33"`. The tag is for telling sessions apart, not for restating the title.
+    - **Same tag for the whole session.** Pick it once and reuse it verbatim, so the user learns to recognize it by ear.
+    - **Order is fixed:** the tag comes *after* the throwaway word, never first — the clipping rule above eats whatever leads, and a clipped tag is worse than none.
+    - **No anchor task?** Use a short description of the work (`"harness config"`, `"inbox triage"`). Never skip the tag — an untagged utterance is exactly the failure this rule exists to prevent.
+
 - **Terse.** One idea per sentence. This is a nudge to attention, not a recital of the on-screen text — never read a whole reply aloud.
 - **No markup in speech.** No markdown, URLs, file paths, code, or backticks — describe them in words ("the controller Makefile", not "`Makefile.k8s`").
 - **Lead with the recommendation and say the word "recommended."** (Standing user rule.)

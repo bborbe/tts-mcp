@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- feat: the `voice` skill now requires every spoken message to carry a short tag naming its subject, placed after the mandatory throwaway lead word (`"Okay. ORB DE40 — closing posted."`). One server serves every Claude Code session from a shared queue, so with several sessions open their speech interleaved with nothing to distinguish them — an unlabeled utterance could not be attributed to a session, task, or repo. The tag is drawn from the session's anchor task, falling back to its parent goal or the repo in play, shortened to 2–4 distinctive words and reused verbatim for the whole session.
+
 ## v0.6.1
 
 ### Added
