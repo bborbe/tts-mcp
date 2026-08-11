@@ -73,6 +73,7 @@ Speech is a different channel from the terminal text. When you call `mcp__tts__s
 
 - **Terse.** One idea per sentence. This is a nudge to attention, not a recital of the on-screen text — never read a whole reply aloud.
 - **No markup in speech.** No markdown, URLs, file paths, code, or backticks — describe them in words ("the controller Makefile", not "`Makefile.k8s`").
+- **Plain words only — no dashes, acronyms, or compound tokens.** The rule above is not sufficient on its own: qwen3 also mangles em/en-dashes, bare acronyms (`IBKR`, `NLV`, `PR`), and hyphenated tokens (`two-b`, `Step 5b`), and can drop into non-English phonetics for the rest of the utterance. Use a full stop or "and" in place of a dash; say acronyms as words ("the trading session", "the pull request") or letter-by-letter ("I B K R"); rename ordinals rather than spelling them ("step two b" → "the stops audit step"). Observed 2026-08-11: three consecutive utterances were unintelligible — *"talking is not english ... i did not unstand anything"* — while `get_status` reported `completed` with `error: null`. **The tool cannot detect this failure; only the listener can**, so the cost falls entirely on the user unless the text is clean before it is sent.
 - **Lead with the recommendation and say the word "recommended."** (Standing user rule.)
 - **Spell choices out loud:** "option one … option two …" and end with "say one or two."
 - **Numbers/IDs:** say them naturally; don't spell long hashes/URLs.

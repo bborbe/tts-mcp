@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- feat: the `voice` skill's speaking playbook now bans dashes, bare acronyms, and hyphenated compound tokens in spoken text, alongside the existing markup ban. qwen3 mangles em/en-dashes, acronyms such as `IBKR`, and tokens like `two-b`, and can drop into non-English phonetics for the remainder of the utterance. The pre-existing rule covered only "markdown, URLs, file paths, code, or backticks", so text using none of those still produced unintelligible audio while `get_status` reported `completed` with `error: null` — the server cannot detect this class of failure, only the listener can. The new bullet gives concrete substitutions: a full stop or "and" in place of a dash, acronyms as words or letter-by-letter, and renamed ordinals instead of spelled ones.
+
 ## v0.7.0
 
 ### Added
