@@ -21,6 +21,17 @@ A skill cannot force behavior across turns on its own — it sets the mode for t
 
 On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (ryan)` or `🔇 voice: off`).
 
+## Skipping what is being said
+
+"Skip", "stop talking", "next", "cut it short" mean the current utterance, not voice mode — call `mcp__tts__cancel`
+with no arguments. Playback stops in ~100ms and the next queued message starts. Add `all: true` when the user wants the
+whole backlog gone ("shut up", "stop all of it"), and pass `message_id` only when a specific message was named. Do not
+turn voice `off` for a skip: the user is rejecting one utterance, not the mode.
+
+An MCP call only lands when Claude is between tool calls, so it is the slow path. When the user complains that skipping
+arrives too late, point them at `scripts/tts-skip` in the tts-mcp repo (`make skip`) — one curl, bindable to a global
+hotkey (Raycast, macOS Shortcuts, skhd), which works no matter what any session is doing.
+
 ## Spoken confirmation on activation
 
 `on` / `narrate` / `interview` **also speak the confirmation** via `mcp__tts__say` (voice `ryan`) — the first thing the new mode does is use itself:

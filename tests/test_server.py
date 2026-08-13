@@ -17,6 +17,7 @@ from src.server import (
     MessageStatus,
     ServerState,
     WorkItem,
+    _fail_item,
     router,
     server_audio_worker,
 )
@@ -111,6 +112,17 @@ def _make_app(state: ServerState) -> FastAPI:
     return app
 
 
+def _finish_if_cancelled(job: Any) -> bool:
+    """Mirror the real player's cancellation contract in the fake."""
+    if job.cancel is None or not job.cancel.is_set():
+        return False
+    if job.on_cancel is not None:
+        job.on_cancel()
+    elif job.on_complete is not None:
+        job.on_complete(None)
+    return True
+
+
 class _ImmediateAudioPlayer:
     """Synchronous fake for server worker tests."""
 
@@ -133,6 +145,8 @@ class _ImmediateAudioPlayer:
                 if job.on_error is not None:
                     job.on_error(_ImmediateAudioPlayer.playback_error)
                 return
+            if _finish_if_cancelled(job):
+                return
             if job.on_complete is not None:
                 job.on_complete(job.output_path)
         finally:
@@ -147,6 +161,8 @@ class _ImmediateAudioPlayer:
             if _ImmediateAudioPlayer.playback_error is not None:
                 if job.on_error is not None:
                     job.on_error(_ImmediateAudioPlayer.playback_error)
+                return
+            if _finish_if_cancelled(job):
                 return
             if job.on_complete is not None:
                 job.on_complete(job.output_path)
@@ -686,6 +702,139 @@ class TestEviction:
         assert response.status_code == 404
 
 
+def _queue_status(state: ServerState, message_id: str, status: str = "queued") -> None:
+    """Register a message in the status dict, as POST /say would."""
+    with state.status_lock:
+        state.statuses[message_id] = MessageStatus(
+            message_id=message_id,
+            status=status,
+            text=f"text for {message_id}",
+            audio_file=None,
+            error=None,
+            completed_at=None,
+        )
+
+
+class TestCancel:
+    """Tests for POST /cancel."""
+
+    def test_empty_body_cancels_what_is_playing(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        event = state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel")
+
+        assert response.status_code == 200
+        assert response.json()["cancelled"] == ["msg_playing"]
+        assert event.is_set()
+
+    def test_nothing_playing_cancels_nothing(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel")
+
+        assert response.status_code == 200
+        assert response.json()["cancelled"] == []
+
+    def test_queued_message_is_marked_cancelled(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_queued")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel", json={"message_id": "msg_queued"})
+
+        assert response.json()["cancelled"] == ["msg_queued"]
+        assert state.is_cancelled("msg_queued")
+        with state.status_lock:
+            assert state.statuses["msg_queued"].status == "cancelled"
+
+    def test_playing_message_keeps_its_status_until_the_player_stops(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        client.post("/cancel", json={"message_id": "msg_playing"})
+
+        # The player owns the final status: reporting "cancelled" here would
+        # claim silence while audio is still leaving the speakers.
+        with state.status_lock:
+            assert state.statuses["msg_playing"].status == "playing"
+
+    def test_all_cancels_playing_and_queued(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        state.begin_playback("msg_playing")
+        _queue_status(state, "msg_a")
+        _queue_status(state, "msg_b")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel", json={"all": True})
+
+        assert sorted(response.json()["cancelled"]) == ["msg_a", "msg_b", "msg_playing"]
+        with state.status_lock:
+            assert state.statuses["msg_a"].status == "cancelled"
+            assert state.statuses["msg_b"].status == "cancelled"
+
+    def test_finished_message_is_not_cancellable(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_done", status="completed")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel", json={"message_id": "msg_done"})
+
+        assert response.json()["cancelled"] == []
+        with state.status_lock:
+            assert state.statuses["msg_done"].status == "completed"
+
+    def test_unknown_message_returns_404(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel", json={"message_id": "msg_nope"})
+
+        assert response.status_code == 404
+
+    def test_reports_remaining_queue_length(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_a")
+        state.work_queue.put(WorkItem(message_id="msg_a", text="A", voice="casual_female", instruct=None, engine=VOXTRAL))
+        client = TestClient(_make_app(state))
+
+        response = client.post("/cancel", json={"message_id": "msg_a"})
+
+        assert response.json()["queued"] == 1
+
+
+class TestFailItem:
+    """Tests for the worker's failure bookkeeping."""
+
+    def test_does_not_overwrite_a_cancelled_message(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_cancelled", status="cancelled")
+
+        # The worker's recovery handler reports anything that goes wrong after
+        # the message settled — a cancelled message must stay cancelled.
+        _fail_item(state, "msg_cancelled", "boom")
+
+        with state.status_lock:
+            assert state.statuses["msg_cancelled"].status == "cancelled"
+            assert state.statuses["msg_cancelled"].error is None
+
+    def test_still_fails_a_message_in_flight(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+
+        _fail_item(state, "msg_playing", "boom")
+
+        with state.status_lock:
+            assert state.statuses["msg_playing"].status == "error"
+            assert state.statuses["msg_playing"].error == "boom"
+
+
 class TestServerAudioWorker:
     """Tests for the server audio worker."""
 
@@ -811,6 +960,84 @@ class TestServerAudioWorker:
             error = state.statuses[msg_id].error
             assert error is not None
             assert "Model crashed" in error
+
+    def test_cancelled_queued_message_is_never_synthesized(self) -> None:
+        state = _make_state()
+        model = _model_of(state)
+        model.generate.return_value = [MagicMock(audio=np.ones(100, dtype=np.float32))]
+
+        _queue_status(state, "msg_skip")
+        _queue_status(state, "msg_keep")
+        for msg_id in ("msg_skip", "msg_keep"):
+            state.work_queue.put(WorkItem(message_id=msg_id, text=msg_id, voice="casual_female", instruct=None, engine=VOXTRAL))
+        state.work_queue.put(None)
+        state.request_cancel("msg_skip", cancel_all=False)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        with state.status_lock:
+            assert state.statuses["msg_skip"].status == "cancelled"
+            assert state.statuses["msg_keep"].status == "completed"
+        # Only the surviving message reached the model.
+        assert model.generate.call_count == 1
+
+    def test_cancel_during_streaming_playback_reports_cancelled(self) -> None:
+        state = _make_state(stream=True)
+        model = _model_of(state)
+
+        # No sleep or barrier is needed here, and adding one would only hide a
+        # regression: the generator body runs on the worker thread, inside the
+        # same next() call that play_stream is driving. So request_cancel has
+        # already returned before play_stream sees the second chunk and checks
+        # the event — the ordering is the generator protocol, not a race.
+        def _generate(**_kwargs: Any) -> Any:
+            yield MagicMock(audio=np.ones(100, dtype=np.float32))
+            state.request_cancel(None, cancel_all=False)
+            yield MagicMock(audio=np.ones(100, dtype=np.float32))
+
+        model.generate.side_effect = _generate
+
+        _queue_status(state, "msg_long")
+        state.work_queue.put(WorkItem(message_id="msg_long", text="Long", voice="casual_female", instruct=None, engine=VOXTRAL))
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        with state.status_lock:
+            assert state.statuses["msg_long"].status == "cancelled"
+            assert state.statuses["msg_long"].audio_file is None
+
+    def test_next_message_plays_after_a_cancelled_one(self) -> None:
+        state = _make_state(stream=True)
+        model = _model_of(state)
+
+        def _generate(*, text: str, **_kwargs: Any) -> Any:
+            yield MagicMock(audio=np.ones(100, dtype=np.float32))
+            if text == "first":
+                state.request_cancel(None, cancel_all=False)
+                yield MagicMock(audio=np.ones(100, dtype=np.float32))
+
+        model.generate.side_effect = _generate
+
+        for msg_id, text in (("msg_first", "first"), ("msg_second", "second")):
+            _queue_status(state, msg_id)
+            state.work_queue.put(WorkItem(message_id=msg_id, text=text, voice="casual_female", instruct=None, engine=VOXTRAL))
+        state.work_queue.put(None)
+
+        t = threading.Thread(target=server_audio_worker, args=(state,))
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+        with state.status_lock:
+            assert state.statuses["msg_first"].status == "cancelled"
+            assert state.statuses["msg_second"].status == "completed"
 
     def test_shuts_down_on_none_sentinel(self) -> None:
         state = _make_state()

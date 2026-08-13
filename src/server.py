@@ -45,6 +45,12 @@ logger = logging.getLogger("tts-server")
 
 STATUS_TTL_SECONDS: int = 3600
 
+CANCELLABLE_STATUSES: frozenset[str] = frozenset({"queued", "loading", "playing"})
+"""Statuses a message can still be cancelled from — everything not yet finished."""
+
+TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error", "cancelled"})
+"""Statuses that are final: once reported, nothing may overwrite them."""
+
 
 @dataclasses.dataclass
 class WorkItem:
@@ -136,6 +142,8 @@ class ServerState:
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
         self.engine_errors: dict[str, str] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancelled: set[str] = set()
         self._loaded_engines: set[str] = set()
         self._status_lock = threading.Lock()
         self._counter = 0
@@ -325,7 +333,7 @@ class ServerState:
         return f"msg_{ts}_{counter:03d}"
 
     def evict_expired(self) -> None:
-        """Remove completed/errored status entries older than TTL."""
+        """Remove completed/errored/cancelled status entries older than TTL."""
         now = time.time()
         with self._status_lock:
             expired = [
@@ -333,6 +341,112 @@ class ServerState:
             ]
             for mid in expired:
                 del self.statuses[mid]
+                self._cancelled.discard(mid)
+
+    def begin_playback(self, message_id: str) -> threading.Event:
+        """Register the message the worker is about to play and hand back its cancel event.
+
+        The event is created per message rather than kept on the player, so a
+        cancel that arrives just as one utterance ends can never silence the
+        next one: it is addressed to a message id, and an id is played once.
+        A message cancelled while it was still queued gets an already-set event,
+        so it is dropped the moment playback would have started.
+
+        Args:
+            message_id: Message about to be played.
+
+        Returns:
+            The cancel event for this message.
+        """
+        with self._status_lock:
+            event = threading.Event()
+            if message_id in self._cancelled:
+                event.set()
+            self._cancel_events[message_id] = event
+            return event
+
+    def end_playback(self, message_id: str) -> None:
+        """Forget a message's cancel event once it is no longer playable.
+
+        Args:
+            message_id: Message that finished, failed, or was cancelled.
+        """
+        with self._status_lock:
+            self._cancel_events.pop(message_id, None)
+            self._cancelled.discard(message_id)
+
+    def is_cancelled(self, message_id: str) -> bool:
+        """Report whether a message was cancelled before the worker reached it.
+
+        Args:
+            message_id: Message the worker just took off the queue.
+
+        Returns:
+            True if the message must be skipped without synthesizing it.
+        """
+        with self._status_lock:
+            return message_id in self._cancelled
+
+    def request_cancel(self, message_id: str | None, cancel_all: bool) -> list[str]:
+        """Cancel the playing message, one named message, or everything in flight.
+
+        A message that is playing is stopped through its cancel event, and the
+        player reports the final ``cancelled`` status once it has actually
+        stopped writing audio. A message still sitting in the queue is marked
+        here and skipped by the worker, so it is never synthesized at all.
+
+        Args:
+            message_id: Message to cancel, or None to cancel what is playing now.
+            cancel_all: Cancel the playing message and drop everything queued
+                behind it. Overrides message_id.
+
+        Returns:
+            The ids that were cancelled, in queue order. Empty when there was
+            nothing left to cancel.
+        """
+        with self._status_lock:
+            if cancel_all:
+                targets = [mid for mid, ms in self.statuses.items() if ms.status in CANCELLABLE_STATUSES]
+            elif message_id is not None:
+                status = self.statuses.get(message_id)
+                targets = [message_id] if status is not None and status.status in CANCELLABLE_STATUSES else []
+            else:
+                targets = list(self._cancel_events)
+
+            playing: list[threading.Event] = []
+            for mid in targets:
+                self._cancelled.add(mid)
+                event = self._cancel_events.get(mid)
+                if event is not None:
+                    # Playing: the player writes the final status from its own
+                    # thread once it stops, so it is never reported as stopped
+                    # while audio is still coming out of the speakers.
+                    playing.append(event)
+                    continue
+                # Queued: nothing will ever play it, so this is the final status.
+                queued = self.statuses.get(mid)
+                if queued is not None:
+                    queued.status = "cancelled"
+                    queued.completed_at = time.time()
+
+        # Woken outside the lock: each event is independent once looked up, and
+        # the threads they wake take the same lock to report their final status.
+        for event in playing:
+            event.set()
+        return targets
+
+    def mark_skipped(self, message_id: str) -> None:
+        """Record a queued message the worker dropped without synthesizing it.
+
+        Args:
+            message_id: Message taken off the queue after it was cancelled.
+        """
+        with self._status_lock:
+            status = self.statuses.get(message_id)
+            if status is not None:
+                status.status = "cancelled"
+                status.completed_at = time.time()
+            self._cancelled.discard(message_id)
 
 
 class SayRequest(BaseModel):
@@ -350,6 +464,20 @@ class SayResponse(BaseModel):
     message_id: str
     status: str
     queue_position: int
+
+
+class CancelRequest(BaseModel):
+    """Request body for POST /cancel. Every field is optional; an empty body cancels what is playing."""
+
+    message_id: str | None = None
+    all: bool = False
+
+
+class CancelResponse(BaseModel):
+    """Response body for POST /cancel."""
+
+    cancelled: list[str]
+    queued: int
 
 
 class StatusResponse(BaseModel):
@@ -506,6 +634,30 @@ def say(request: Request, body: SayRequest) -> SayResponse:
     return SayResponse(message_id=message_id, status="queued", queue_position=queue_position)
 
 
+@router.post("/cancel")
+def cancel(request: Request, body: CancelRequest | None = None) -> CancelResponse:
+    """Stop speech that is playing and let the next queued message start.
+
+    With no body the message currently playing is stopped. With ``message_id``
+    only that message is affected — cancelling one that is still queued drops it
+    before it is ever synthesized. With ``all`` the playing message is stopped
+    and everything queued behind it is dropped.
+    """
+    state: ServerState = request.app.state.server
+    args = body if body is not None else CancelRequest()
+
+    if args.message_id is not None:
+        with state.status_lock:
+            known = args.message_id in state.statuses
+        if not known:
+            raise HTTPException(status_code=404, detail=f"Unknown message ID: {args.message_id}")
+
+    cancelled = state.request_cancel(args.message_id, args.all)
+    logger.debug("POST /cancel cancelled %s", cancelled)
+
+    return CancelResponse(cancelled=cancelled, queued=state.work_queue.qsize())
+
+
 @router.get("/status/{message_id}")
 def status(request: Request, message_id: str) -> StatusResponse:
     """Check the status of a queued/playing/completed message."""
@@ -532,6 +684,12 @@ def status(request: Request, message_id: str) -> StatusResponse:
 def _fail_item(state: ServerState, message_id: str, error: str) -> None:
     """Mark a work item as failed in the status dict.
 
+    A message that already reached a terminal state keeps it. The worker's
+    recovery handler reports any unexpected exception through here, including
+    one raised after the message was already settled — a message the caller was
+    told is ``cancelled`` must not later report ``error`` because the bookkeeping
+    that followed the cancellation tripped.
+
     Args:
         state: Server state with status dict and lock.
         message_id: ID of the failed message.
@@ -539,7 +697,7 @@ def _fail_item(state: ServerState, message_id: str, error: str) -> None:
     """
     with state.status_lock:
         ms = state.statuses.get(message_id)
-        if ms is not None:
+        if ms is not None and ms.status not in TERMINAL_STATUSES:
             ms.status = "error"
             ms.error = error
             ms.completed_at = time.time()
@@ -567,8 +725,9 @@ def _start_playback(
 
     work_item, chunks = pending
     done = threading.Event()
-    on_complete, on_error = _playback_status_callbacks(state, work_item, done)
+    on_complete, on_error, on_cancel = _playback_status_callbacks(state, work_item, done)
 
+    cancel = state.begin_playback(work_item.message_id)
     with state.status_lock:
         state.statuses[work_item.message_id].status = "playing"
 
@@ -579,9 +738,31 @@ def _start_playback(
             output_path=output_path,
             on_complete=on_complete,
             on_error=on_error,
+            on_cancel=on_cancel,
+            cancel=cancel,
         )
     )
     return done
+
+
+def _skip_if_cancelled(state: ServerState, item: WorkItem) -> bool:
+    """Drop a message that was cancelled while it waited in the queue.
+
+    Checked before the engine is resolved, so a cancelled message costs neither
+    a model load nor a single generated sample.
+
+    Args:
+        state: Server state holding the cancellation bookkeeping.
+        item: Work item just taken off the queue.
+
+    Returns:
+        True if the item was cancelled and must not be synthesized.
+    """
+    if not state.is_cancelled(item.message_id):
+        return False
+    logger.debug("Skipping cancelled message %s", item.message_id)
+    state.mark_skipped(item.message_id)
+    return True
 
 
 def _load_default_engine(state: ServerState) -> LoadedEngine | None:
@@ -684,8 +865,12 @@ def _playback_status_callbacks(
     state: ServerState,
     item: WorkItem,
     done: threading.Event,
-) -> tuple[Callable[[Path | None], None], Callable[[Exception], None]]:
-    """Build on_complete/on_error callbacks that record playback status for one item."""
+) -> tuple[Callable[[Path | None], None], Callable[[Exception], None], Callable[[], None]]:
+    """Build on_complete/on_error/on_cancel callbacks that record playback status for one item.
+
+    Exactly one of them fires per item, and each releases ``done`` so the worker
+    moves on to the next queued message.
+    """
 
     def on_complete(output_path: Path | None) -> None:
         with state.status_lock:
@@ -693,6 +878,7 @@ def _playback_status_callbacks(
             ms.status = "completed"
             ms.audio_file = str(output_path) if output_path is not None else None
             ms.completed_at = time.time()
+        state.end_playback(item.message_id)
         logger.debug("Playback completed for %s -> %s", item.message_id, output_path)
         done.set()
 
@@ -703,9 +889,19 @@ def _playback_status_callbacks(
             ms.status = "error"
             ms.error = str(exc)
             ms.completed_at = time.time()
+        state.end_playback(item.message_id)
         done.set()
 
-    return on_complete, on_error
+    def on_cancel() -> None:
+        with state.status_lock:
+            ms = state.statuses[item.message_id]
+            ms.status = "cancelled"
+            ms.completed_at = time.time()
+        state.end_playback(item.message_id)
+        logger.debug("Playback cancelled for %s", item.message_id)
+        done.set()
+
+    return on_complete, on_error, on_cancel
 
 
 def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
@@ -726,16 +922,21 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
                 break
             current_item = item
 
+            if _skip_if_cancelled(state, item):
+                state.work_queue.task_done()
+                continue
+
             loaded = _resolve_engine(state, item)
             if loaded is None:
                 state.work_queue.task_done()
                 continue
 
+            cancel = state.begin_playback(item.message_id)
             with state.status_lock:
                 state.statuses[item.message_id].status = "playing"
 
             done = threading.Event()
-            on_complete, on_error = _playback_status_callbacks(state, item, done)
+            on_complete, on_error, on_cancel = _playback_status_callbacks(state, item, done)
             output_path = make_output_path(OUTPUT_DIR) if state.save_wav else None
 
             try:
@@ -745,6 +946,8 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
                     output_path,
                     on_complete,
                     on_error,
+                    on_cancel=on_cancel,
+                    cancel=cancel,
                 )
             except (RuntimeError, ValueError) as exc:
                 logger.error("TTS generation failed for %s: %s", item.message_id, exc)
@@ -752,14 +955,44 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
                 done.set()
 
             done.wait()
+            state.end_playback(item.message_id)
             state.work_queue.task_done()
 
         except Exception as exc:
             logger.error("Audio worker caught unexpected error (recovering): %s", exc, exc_info=True)
             if current_item is not None:
                 _fail_item(state, current_item.message_id, f"unexpected worker error: {exc}")
+                state.end_playback(current_item.message_id)
                 with contextlib.suppress(ValueError):
                     state.work_queue.task_done()
+
+
+def _prepare_buffered_item(state: ServerState, item: WorkItem) -> tuple[WorkItem, list[np.ndarray]] | None:
+    """Synthesize one queued message, ready for playback.
+
+    Cancellation is checked twice: before any work, so a cancelled message costs
+    nothing, and again after generation, because a cancel that lands while the
+    model is running still means nobody wants to hear the result.
+
+    Args:
+        state: Server state with the engine registry and status tracking.
+        item: Work item just taken off the queue.
+
+    Returns:
+        The item paired with its audio, or None if it was cancelled or failed.
+    """
+    if _skip_if_cancelled(state, item):
+        return None
+
+    loaded = _resolve_engine(state, item)
+    if loaded is None:
+        return None
+
+    chunks = _generate_item(state, loaded, item)
+    if chunks is None or _skip_if_cancelled(state, item):
+        return None
+
+    return (item, chunks)
 
 
 def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
@@ -785,16 +1018,7 @@ def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
                 break
 
             current_item = item
-
-            loaded = _resolve_engine(state, item)
-            if loaded is None:
-                state.work_queue.task_done()
-                continue
-
-            chunks = _generate_item(state, loaded, item)
-            if chunks is not None:
-                pending = (item, chunks)
-
+            pending = _prepare_buffered_item(state, item)
             state.work_queue.task_done()
 
         except Exception as exc:
@@ -805,6 +1029,7 @@ def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
             )
             if current_item is not None:
                 _fail_item(state, current_item.message_id, f"unexpected worker error: {exc}")
+                state.end_playback(current_item.message_id)
                 with contextlib.suppress(ValueError):
                     state.work_queue.task_done()
 

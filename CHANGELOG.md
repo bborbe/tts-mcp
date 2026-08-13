@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- feat: speech can now be skipped. `POST /cancel`, the `cancel` MCP tool, and `scripts/tts-skip` (aka `make skip`) stop the utterance that is playing and start the next queued message immediately; `all: true` also drops the queue behind it. Previously a long message had to be heard to the end — the audio worker had no interruption path at all, and the player's blocking per-chunk write meant even stopping the queue would not silence the current utterance. Playback now stops within ~100ms (audio is written in slices, and the cancel event also stops MLX generation so no GPU time is spent on audio nobody will hear), and a cancelled message saves no WAV. Cancelling a message that is still queued drops it before it is ever synthesized. Cancel events are owned per message, so a cancel that lands as one utterance ends can never silence the next one. `scripts/tts-skip` is a dependency-free curl wrapper meant for a global hotkey, so skipping does not wait for an agent to be idle enough to call the MCP tool.
+
+### Changed
+
+- refactor: the MCP relay's environment reads and logging moved out of `mcp/tts-mcp.ts` into `mcp/config.ts` and `mcp/logger.ts`. `process.env` was read at module scope, before anything could validate it, so a bad value surfaced as a confusing failure elsewhere; config is now resolved on demand and a missing key names the file it was expected in. Tool handlers log one JSON object per line to stderr instead of unstructured `console.error` text — stdout stays reserved for the MCP JSON-RPC frames, and connection failures are now logged rather than only returned to the caller.
+
 ## v0.7.0
 
 ### Added

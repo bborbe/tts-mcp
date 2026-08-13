@@ -403,6 +403,176 @@ class TestPlayStream:
         assert drained[-1] is None
 
 
+class TestPlayStreamCancel:
+    """Tests for cancelling generation from play_stream."""
+
+    def test_stops_generating_when_cancelled(self) -> None:
+        submitted: list[StreamingPlaybackJob] = []
+        player = MagicMock()
+        player.submit_stream.side_effect = submitted.append
+        cancel = threading.Event()
+        generated = 0
+
+        def _endless() -> "Iterator[np.ndarray]":
+            nonlocal generated
+            while True:
+                generated += 1
+                if generated == 2:
+                    cancel.set()
+                yield np.ones(3, dtype=np.float32)
+
+        play_stream(player, _endless(), None, None, None, cancel=cancel)
+
+        # Generation stops at the chunk boundary after the event; the chunk in
+        # flight is dropped rather than queued, since nothing will play it.
+        assert generated == 2
+        drained = _drain(submitted[0].chunk_source)
+        assert [None if c is None else len(c) for c in drained] == [3, None]
+
+    def test_passes_cancel_and_on_cancel_to_the_job(self) -> None:
+        submitted: list[StreamingPlaybackJob] = []
+        player = MagicMock()
+        player.submit_stream.side_effect = submitted.append
+        cancel = threading.Event()
+
+        def _on_cancel() -> None:
+            return
+
+        play_stream(player, iter([]), None, None, None, on_cancel=_on_cancel, cancel=cancel)
+
+        assert submitted[0].cancel is cancel
+        assert submitted[0].on_cancel is _on_cancel
+
+
+class TestAudioPlayerCancel:
+    """Tests for cancelling a job the player is already playing."""
+
+    @pytest.fixture(autouse=True)
+    def _stable_default_device(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: 1)
+
+    @patch("src.tts.player.sd")
+    def test_buffered_job_stops_mid_utterance(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        cancel = threading.Event()
+
+        # Each chunk is one 100ms write slice at this sample rate, so the event
+        # set during the first chunk stops playback before the second.
+        mock_stream.write.side_effect = lambda _frames: cancel.set()
+
+        cancelled: list[bool] = []
+        completed: list[Path | None] = []
+        output_path = tmp_path / "cancelled.wav"
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 4,
+                output_path=output_path,
+                on_complete=completed.append,
+                on_cancel=lambda: cancelled.append(True),
+                cancel=cancel,
+            )
+        )
+        player.close()
+
+        assert cancelled == [True]
+        assert completed == []
+        assert not output_path.exists()
+        assert mock_stream.write.call_count == 1
+
+    @patch("src.tts.player.sd")
+    def test_streaming_job_stops_and_saves_nothing(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        cancel = threading.Event()
+        cancel.set()
+
+        source: queue.Queue[np.ndarray | None] = queue.Queue()
+        source.put(np.ones(100, dtype=np.float32))
+        source.put(None)
+
+        cancelled: list[bool] = []
+        output_path = tmp_path / "cancelled-stream.wav"
+        player.submit_stream(
+            StreamingPlaybackJob(
+                chunk_source=source,
+                output_path=output_path,
+                on_complete=lambda _path: pytest.fail("cancelled job reported completion"),
+                on_cancel=lambda: cancelled.append(True),
+                cancel=cancel,
+            )
+        )
+        player.close()
+
+        assert cancelled == [True]
+        assert not output_path.exists()
+        assert mock_stream.write.call_count == 0
+
+    @patch("src.tts.player.sd")
+    def test_cancel_set_after_the_last_chunk_still_completes(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        cancel = threading.Event()
+
+        # Cancel lands while the final slice is being written: the audio was
+        # played in full, so this is a completion, not a cancellation.
+        mock_stream.write.side_effect = lambda _frames: cancel.set()
+
+        completed: list[Path | None] = []
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(50, dtype=np.float32)],
+                output_path=None,
+                on_complete=completed.append,
+                on_cancel=lambda: pytest.fail("fully played job reported cancellation"),
+                cancel=cancel,
+            )
+        )
+        player.close()
+
+        assert completed == [None]
+
+    @patch("src.tts.player.sd")
+    def test_cancelled_job_without_on_cancel_reports_completion(self, mock_sd: MagicMock) -> None:
+        mock_sd.OutputStream.return_value = MagicMock()
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        cancel = threading.Event()
+        cancel.set()
+
+        completed: list[Path | None] = []
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)],
+                output_path=None,
+                on_complete=completed.append,
+                cancel=cancel,
+            )
+        )
+        player.close()
+
+        assert completed == [None]
+
+    @patch("src.tts.player.sd")
+    def test_next_job_plays_after_a_cancelled_one(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        cancel = threading.Event()
+        cancel.set()
+
+        completed: list[Path | None] = []
+        player.submit(PlaybackJob(chunks=[np.ones(100, dtype=np.float32)], output_path=None, cancel=cancel))
+        player.submit(PlaybackJob(chunks=[np.ones(100, dtype=np.float32)], output_path=None, on_complete=completed.append))
+        player.close()
+
+        # The cancelled job wrote nothing; the following one played in full.
+        assert mock_stream.write.call_count == 1
+        assert completed == [None]
+
+
 class TestAudioPlayerStreaming:
     """Tests for AudioPlayer streaming playback jobs."""
 

@@ -14,6 +14,15 @@ import sounddevice as sd
 
 from src.tts.protocols import AudioOutputStream
 
+WRITE_SLICE_SECONDS: float = 0.1
+"""Audio written to the output stream per blocking write.
+
+A blocking ``stream.write`` returns only once the device has taken the audio, so
+the slice length is also the worst-case delay between a cancel request and
+playback actually stopping. Small enough to feel instant, large enough that the
+per-write overhead stays negligible.
+"""
+
 
 def _refresh_audio_devices() -> None:
     """Re-enumerate audio devices so the next stream opens on the current default output.
@@ -79,12 +88,32 @@ def play_audio(audio: np.ndarray, sample_rate: int) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class PlaybackJob:
-    """One playback request for the persistent audio player."""
+    """One playback request for the persistent audio player.
+
+    Exactly one terminal callback fires per job: ``on_complete`` when the audio
+    played out, ``on_error`` when playback failed, ``on_cancel`` when ``cancel``
+    was set before the job finished. A cancelled job writes no WAV file, because
+    the recording would hold audio the listener never heard.
+
+    Attributes:
+        chunks: Fully generated audio for this utterance.
+        output_path: Path to save the utterance to, or None to skip saving.
+        on_complete: Called with output_path when playback finishes.
+        on_error: Called if playback fails.
+        on_cancel: Called instead of on_complete when the job is cancelled. When
+            it is None, a cancelled job reports through ``on_complete(None)`` so
+            a waiting caller is never left hanging.
+        cancel: Set by the submitter to stop this job part-way. Owned per job,
+            so cancelling the utterance that is playing now can never leak into
+            the one that starts next.
+    """
 
     chunks: list[np.ndarray]
     output_path: Path | None
     on_complete: Callable[[Path | None], None] | None = None
     on_error: Callable[[Exception], None] | None = None
+    on_cancel: Callable[[], None] | None = None
+    cancel: threading.Event | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,12 +125,19 @@ class StreamingPlaybackJob:
     thread writes each chunk to the warm output stream as it arrives. This
     starts playback after the first chunk instead of buffering the whole
     utterance first (see PlaybackJob for the buffered variant).
+
+    Cancellation works as it does for PlaybackJob: exactly one terminal callback
+    fires, and a cancelled job saves no WAV. The player stops consuming
+    ``chunk_source`` immediately; the producer notices the same event and stops
+    generating (see play_stream), so no one waits for the abandoned queue.
     """
 
     chunk_source: "queue.Queue[np.ndarray | None]"
     output_path: Path | None
     on_complete: Callable[[Path | None], None] | None = None
     on_error: Callable[[Exception], None] | None = None
+    on_cancel: Callable[[], None] | None = None
+    cancel: threading.Event | None = None
 
 
 class AudioPlayer:
@@ -138,6 +174,7 @@ class AudioPlayer:
 
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
+        self._slice_frames = max(1, int(sample_rate * WRITE_SLICE_SECONDS))
         self._jobs: queue.Queue[PlaybackJob | StreamingPlaybackJob | None] = queue.Queue()
         self._unhandled_errors: queue.Queue[Exception] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -193,6 +230,41 @@ class AudioPlayer:
             return stream
         return self._open_stream()
 
+    def _write_chunk(self, stream: AudioOutputStream, chunk: np.ndarray, cancel: threading.Event | None) -> bool:
+        """Write one chunk to the output stream, in cancellable slices.
+
+        ``stream.write`` blocks until the device has taken the audio, so writing
+        a whole chunk at once would make cancellation wait out the chunk (a
+        second, at the default streaming_interval). Slicing bounds that wait to
+        WRITE_SLICE_SECONDS.
+
+        Args:
+            stream: Warm output stream to write to.
+            chunk: Audio samples for this chunk.
+            cancel: Cancellation event for the current job, or None.
+
+        Returns:
+            True if the whole chunk was written, False if cancelled part-way.
+        """
+        frames = chunk.reshape(-1, 1)
+        for start in range(0, len(frames), self._slice_frames):
+            if cancel is not None and cancel.is_set():
+                return False
+            stream.write(frames[start : start + self._slice_frames])
+        return True
+
+    def _finish_cancelled(self, job: PlaybackJob | StreamingPlaybackJob) -> None:
+        """Report a cancelled job through its terminal callback.
+
+        Falls back to ``on_complete(None)`` when no on_cancel was given, so a
+        caller waiting on completion is never left blocked by a cancel it did
+        not ask to hear about.
+        """
+        if job.on_cancel is not None:
+            job.on_cancel()
+        elif job.on_complete is not None:
+            job.on_complete(None)
+
     def _handle_job(self, stream: AudioOutputStream | None, job: PlaybackJob) -> AudioOutputStream | None:
         """Play one job on the warm stream.
 
@@ -210,7 +282,9 @@ class AudioPlayer:
         try:
             stream = self._ensure_stream(stream)
             for chunk in job.chunks:
-                stream.write(chunk.reshape(-1, 1))
+                if not self._write_chunk(stream, chunk, job.cancel):
+                    self._finish_cancelled(job)
+                    return stream
             if job.output_path is not None:
                 audio = np.concatenate(job.chunks)
                 save_audio(audio, job.output_path, self._sample_rate)
@@ -240,9 +314,17 @@ class AudioPlayer:
                 chunk = job.chunk_source.get()
                 if chunk is None:
                     break
-                stream.write(chunk.reshape(-1, 1))
+                if not self._write_chunk(stream, chunk, job.cancel):
+                    self._finish_cancelled(job)
+                    return stream
                 if job.output_path is not None:
                     collected.append(chunk)
+            # The producer sends the sentinel as soon as it sees the same cancel
+            # event, so the loop can also end on a cancel rather than on a
+            # finished utterance — that is still a cancellation, not a completion.
+            if job.cancel is not None and job.cancel.is_set():
+                self._finish_cancelled(job)
+                return stream
             if job.output_path is not None and collected:
                 save_audio(np.concatenate(collected), job.output_path, self._sample_rate)
             if job.on_complete is not None:
@@ -322,6 +404,8 @@ def play_stream(
     output_path: Path | None,
     on_complete: Callable[[Path | None], None] | None,
     on_error: Callable[[Exception], None] | None,
+    on_cancel: Callable[[], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> None:
     """Feed streamed generation chunks to the player as they are produced.
 
@@ -332,12 +416,18 @@ def play_stream(
     generation is exhausted; playback of the tail continues on the player thread
     and completion is signalled through on_complete.
 
+    When ``cancel`` is set, generation stops at the next chunk boundary — the
+    player has already stopped playing by then, so continuing to drive the model
+    would burn GPU time producing audio nobody will hear.
+
     Args:
         player: Persistent audio player.
         chunk_iter: Iterator yielding audio chunks as they are generated.
         output_path: Path to save the full utterance, or None to skip saving.
         on_complete: Called with output_path when playback finishes.
         on_error: Called if playback fails.
+        on_cancel: Called instead of on_complete when the job is cancelled.
+        cancel: Event that stops both playback and generation when set.
     """
     source: queue.Queue[np.ndarray | None] = queue.Queue()
     player.submit_stream(
@@ -346,10 +436,14 @@ def play_stream(
             output_path=output_path,
             on_complete=on_complete,
             on_error=on_error,
+            on_cancel=on_cancel,
+            cancel=cancel,
         )
     )
     try:
         for chunk in chunk_iter:
+            if cancel is not None and cancel.is_set():
+                break
             source.put(chunk)
     finally:
         source.put(None)

@@ -11,6 +11,7 @@ Local text-to-speech on Apple Silicon via MLX, with real-time streaming playback
 | Streaming Playback | Plays each utterance as it generates (chunk-by-chunk) for low latency; a buffered mode with cross-message lookahead and loudness normalization is also available |
 | Interactive CLI | Terminal interface with model/voice selection, ESC to quit, and backspace support |
 | REST API Server | FastAPI server with queued sequential playback and message status tracking |
+| Skippable Playback | `POST /cancel` (or `scripts/tts-skip`, bindable to a hotkey) stops the current utterance in ~100ms and starts the next queued one |
 | MCP Server | Ready-to-use MCP bridge for Claude Code and Claude Desktop integration |
 | Pluggable Engines | `engine: voxtral` or `engine: qwen3` in config.yaml selects the model family; both stream. Declare several via `engines:` and pick one per request — models load lazily, so unused engines cost nothing |
 | Multi-Voice | Voxtral: 20 voices across 9 languages. Qwen3: 9 named speakers across 10 languages |
@@ -303,6 +304,7 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
 | GET | `/health` | Liveness check |
 | GET | `/voices` | List available voices and default voice, plus per-engine grouping and load state |
 | POST | `/say` | Queue text for synthesis and playback (returns message ID) |
+| POST | `/cancel` | Stop the utterance that is playing (and optionally drop the queue behind it) |
 | GET | `/status/{message_id}` | Check status of a queued/loading/playing/completed message |
 
 ### POST /say
@@ -325,17 +327,48 @@ at request time rather than failing later inside the worker.
 
 Returns `202 Accepted` with a message ID and queue position. Audio plays through the server's speakers.
 
+### POST /cancel
+
+```json
+{
+  "message_id": "msg_20260813_120000_001",
+  "all": false
+}
+```
+
+Every field is optional. An empty body (or no body at all) stops whatever is playing right now, and the next queued
+message starts immediately. `message_id` targets one message — if it has not started yet it is dropped without ever
+being synthesized, so no model time is spent on it. `all` stops the current message and drops every message queued
+behind it.
+
+Returns the cancelled message IDs and how many requests are still queued. Cancelling nothing is not an error:
+`{"cancelled": [], "queued": 0}` simply means there was nothing left to stop. An unknown `message_id` is a 404.
+
+Playback stops within about 100 ms — the audio already handed to CoreAudio still plays out. A cancelled message saves
+no WAV file, because the recording would hold audio nobody heard.
+
+```bash
+scripts/tts-skip          # stop the current utterance (also: make skip)
+scripts/tts-skip --all    # stop it and drop the queue behind it
+```
+
+`scripts/tts-skip` is a dependency-free curl wrapper meant for a global hotkey (Raycast, macOS Shortcuts, skhd), so a
+long utterance can be skipped without waiting for an AI agent to be idle enough to call the MCP tool.
+
 ### Message Lifecycle
 
-`queued` -> `playing` -> `completed` (with audio file path) or `error` (with error details). Completed statuses expire after 1 hour.
+`queued` -> `playing` -> `completed` (with audio file path) or `error` (with error details). A message stopped through
+`/cancel` ends as `cancelled` instead, from either `queued` (never synthesized) or `playing` (stopped mid-utterance).
+Finished statuses expire after 1 hour.
 
 ## MCP Server
 
-The MCP server (`mcp/tts-mcp.ts`) is a transparent relay between MCP clients and the FastAPI server. It exposes three tools:
+The MCP server (`mcp/tts-mcp.ts`) is a transparent relay between MCP clients and the FastAPI server. It exposes four tools:
 
 | Tool | Description |
 |------|-------------|
 | `say` | Queue text for speech synthesis with a specified voice (optional `instruct` on qwen3) |
+| `cancel` | Stop the utterance that is playing, one named message, or the whole queue |
 | `get_voices` | List all available voices |
 | `get_status` | Check status of a speech request by message ID |
 
