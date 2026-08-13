@@ -48,6 +48,9 @@ STATUS_TTL_SECONDS: int = 3600
 CANCELLABLE_STATUSES: frozenset[str] = frozenset({"queued", "loading", "playing"})
 """Statuses a message can still be cancelled from — everything not yet finished."""
 
+TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error", "cancelled"})
+"""Statuses that are final: once reported, nothing may overwrite them."""
+
 
 @dataclasses.dataclass
 class WorkItem:
@@ -681,6 +684,12 @@ def status(request: Request, message_id: str) -> StatusResponse:
 def _fail_item(state: ServerState, message_id: str, error: str) -> None:
     """Mark a work item as failed in the status dict.
 
+    A message that already reached a terminal state keeps it. The worker's
+    recovery handler reports any unexpected exception through here, including
+    one raised after the message was already settled — a message the caller was
+    told is ``cancelled`` must not later report ``error`` because the bookkeeping
+    that followed the cancellation tripped.
+
     Args:
         state: Server state with status dict and lock.
         message_id: ID of the failed message.
@@ -688,7 +697,7 @@ def _fail_item(state: ServerState, message_id: str, error: str) -> None:
     """
     with state.status_lock:
         ms = state.statuses.get(message_id)
-        if ms is not None:
+        if ms is not None and ms.status not in TERMINAL_STATUSES:
             ms.status = "error"
             ms.error = error
             ms.completed_at = time.time()

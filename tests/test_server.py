@@ -17,6 +17,7 @@ from src.server import (
     MessageStatus,
     ServerState,
     WorkItem,
+    _fail_item,
     router,
     server_audio_worker,
 )
@@ -806,6 +807,32 @@ class TestCancel:
         response = client.post("/cancel", json={"message_id": "msg_a"})
 
         assert response.json()["queued"] == 1
+
+
+class TestFailItem:
+    """Tests for the worker's failure bookkeeping."""
+
+    def test_does_not_overwrite_a_cancelled_message(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_cancelled", status="cancelled")
+
+        # The worker's recovery handler reports anything that goes wrong after
+        # the message settled — a cancelled message must stay cancelled.
+        _fail_item(state, "msg_cancelled", "boom")
+
+        with state.status_lock:
+            assert state.statuses["msg_cancelled"].status == "cancelled"
+            assert state.statuses["msg_cancelled"].error is None
+
+    def test_still_fails_a_message_in_flight(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+
+        _fail_item(state, "msg_playing", "boom")
+
+        with state.status_lock:
+            assert state.statuses["msg_playing"].status == "error"
+            assert state.statuses["msg_playing"].error == "boom"
 
 
 class TestServerAudioWorker:
