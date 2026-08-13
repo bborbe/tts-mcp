@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Local text-to-speech for Claude Code — /voice skill backed by the tts-mcp server",
-    "version": "0.8.0"
+    "version": "0.8.1"
   },
   "plugins": [
     {
       "name": "tts-mcp",
       "description": "Local text-to-speech for Claude Code — /voice session toggle plus the spoken-output playbook",
       "source": "./",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "strict": true
     }
   ]
