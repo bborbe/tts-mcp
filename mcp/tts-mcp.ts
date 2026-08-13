@@ -240,6 +240,35 @@ server.tool(
 );
 
 server.tool(
+  "cancel",
+  "Stop speech that is currently playing and let the next queued message start immediately. " +
+    "Call with no arguments when the user asks to skip, stop, or cut short what is being said. " +
+    "Pass message_id to cancel one specific message (if it has not started yet it is dropped " +
+    "without being synthesized at all), or all=true to stop the current message and drop the " +
+    "whole queue behind it. Returns the cancelled message IDs and how many remain queued.",
+  {
+    message_id: z
+      .string()
+      .optional()
+      .describe(
+        "Message ID to cancel. Omit to cancel whatever is playing right now.",
+      ),
+    all: z
+      .boolean()
+      .optional()
+      .describe(
+        "Cancel the playing message and drop every queued message behind it.",
+      ),
+  },
+  async ({ message_id, all }) => {
+    console.error(
+      `[tts-mcp] cancel: message_id=${message_id ?? "-"} all=${all ?? false}`,
+    );
+    return request("POST", "/cancel", { message_id, all: all ?? false });
+  },
+);
+
+server.tool(
   "get_voices",
   "List all available TTS voices and the default voice from the speech server. The response also groups voices per engine, with each engine's language, whether it supports instruct, and whether its model is already loaded.",
   {},

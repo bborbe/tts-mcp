@@ -25,6 +25,11 @@ run:
 chat:
 	uv run -m src.main
 
+.PHONY: skip
+# Stop the utterance that is playing; the next queued message starts immediately
+skip:
+	bash scripts/tts-skip
+
 .PHONY: download
 # Download a Voxtral TTS model into data/models/
 download:
