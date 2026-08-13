@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- docs: the `voice` skill now forbids describing speech that was never sent. It already required a spoken gist for every substantive answer in `narrate`, and listed what must never be spoken aloud, but nothing covered the inverse failure — writing "spoken now", or narrating the utterance in the reply, while `mcp__tts__say` is never called. That reads correct on screen and is silent to a user who has walked away from it, which is exactly the case `narrate` exists for. The intent to speak gets written down instead of executed, so the reply looks right and nothing is heard. Observed in a live session and corrected by the user with "Always use the voice tool."
+
 ## v0.8.0
 
 ### Added

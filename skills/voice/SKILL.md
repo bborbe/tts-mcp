@@ -114,6 +114,8 @@ The screen is the detail channel; voice is the attention channel. A `say()` cost
 
 `narrate` is the mode to reach for when the user asks a question *and* turns voice on in the same breath — that pairing means they want the answer in their ears, not just on screen.
 
+**Never describe speech you did not send.** Writing "spoken now", "I'll say that aloud", or narrating the utterance in your reply is not the channel — only `mcp__tts__say` is. If the tool was not called the user hears nothing, and text claiming otherwise is simply false. Call the tool, or say nothing about speaking. The failure is easy to miss because the reply *reads* correct: the intent to speak gets written down instead of executed, most often on a substantive answer in `narrate` where the spoken gist is owed but the turn ends with text alone.
+
 ## Persistence note
 
 - Session toggle **and volume policy** → this skill (`on` / `narrate` / `interview` / `off`). Nothing else owns this.
