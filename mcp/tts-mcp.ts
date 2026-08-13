@@ -7,37 +7,13 @@
  * fallbacks, no swallowed errors.
  */
 
-import { existsSync, readFileSync } from "fs";
-import { homedir } from "os";
-import { dirname, resolve } from "path";
-import { fileURLToPath } from "url";
-
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT = resolve(__dirname, "..");
+import { loadServerUrl } from "./config.js";
+import { log } from "./logger.js";
 
-// Config file resolution, matching src/tts.py resolve_config_path(). Precedence:
-//   1. $TTS_MCP_CONFIG (explicit override)
-//   2. $XDG_CONFIG_HOME/tts-mcp/config.yaml (defaults to ~/.config/tts-mcp/config.yaml)
-//   3. <project root>/config.yaml (back-compat)
-function resolveConfigPath(): string {
-  const override = process.env.TTS_MCP_CONFIG;
-  if (override) {
-    return override;
-  }
-  const xdgHome = process.env.XDG_CONFIG_HOME || resolve(homedir(), ".config");
-  const xdgPath = resolve(xdgHome, "tts-mcp", "config.yaml");
-  if (existsSync(xdgPath)) {
-    return xdgPath;
-  }
-  return resolve(PROJECT_ROOT, "config.yaml");
-}
-
-const CONFIG_PATH = resolveConfigPath();
 const HEALTH_TIMEOUT_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -45,36 +21,6 @@ type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
 };
-
-function loadServerUrl(): string {
-  let content: string;
-  try {
-    content = readFileSync(CONFIG_PATH, "utf-8");
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `Cannot read config file ${CONFIG_PATH}: ${detail}`,
-    );
-  }
-
-  const hostMatch = content.match(/^host:\s*(.+)$/m);
-  if (!hostMatch) {
-    throw new Error(`Missing required key 'host' in ${CONFIG_PATH}`);
-  }
-
-  const portMatch = content.match(/^port:\s*(\d+)/m);
-  if (!portMatch) {
-    throw new Error(`Missing required key 'port' in ${CONFIG_PATH}`);
-  }
-
-  const host = hostMatch[1].trim();
-  const port = portMatch[1].trim();
-
-  // 0.0.0.0 is a listen address; connect via 127.0.0.1
-  const connectHost = host === "0.0.0.0" ? "127.0.0.1" : host;
-
-  return `http://${connectHost}:${port}`;
-}
 
 async function healthCheck(): Promise<ToolResult | null> {
   const baseUrl = loadServerUrl();
@@ -116,6 +62,7 @@ async function healthCheck(): Promise<ToolResult | null> {
       message: `Speech server is not reachable at ${baseUrl}`,
       details: detail,
     };
+    log.error("health check unreachable", { url, details: detail });
     return {
       content: [{ type: "text", text: JSON.stringify(error, null, 2) }],
       isError: true,
@@ -155,6 +102,7 @@ async function request(
       message: `Speech server is not reachable at ${baseUrl}`,
       details: detail,
     };
+    log.error("request failed", { method, url, details: detail });
     return {
       content: [{ type: "text", text: JSON.stringify(error, null, 2) }],
       isError: true,
@@ -232,9 +180,12 @@ server.tool(
       ),
   },
   async ({ voice, text, instruct, engine }) => {
-    console.error(
-      `[tts-mcp] say: voice=${voice} engine=${engine ?? "default"} instruct=${instruct ?? "-"} text="${text.slice(0, 80)}"`,
-    );
+    log.info("say", {
+      voice,
+      engine: engine ?? "default",
+      instruct: instruct ?? null,
+      text: text.slice(0, 80),
+    });
     return request("POST", "/say", { text, voice, instruct, engine });
   },
 );
@@ -261,9 +212,7 @@ server.tool(
       ),
   },
   async ({ message_id, all }) => {
-    console.error(
-      `[tts-mcp] cancel: message_id=${message_id ?? "-"} all=${all ?? false}`,
-    );
+    log.info("cancel", { message_id: message_id ?? null, all: all ?? false });
     return request("POST", "/cancel", { message_id, all: all ?? false });
   },
 );
@@ -273,7 +222,7 @@ server.tool(
   "List all available TTS voices and the default voice from the speech server. The response also groups voices per engine, with each engine's language, whether it supports instruct, and whether its model is already loaded.",
   {},
   async () => {
-    console.error("[tts-mcp] get_voices");
+    log.info("get_voices");
     return request("GET", "/voices");
   },
 );
@@ -287,7 +236,7 @@ server.tool(
       .describe("Message ID returned by the say tool."),
   },
   async ({ message_id }) => {
-    console.error(`[tts-mcp] get_status: message_id=${message_id}`);
+    log.info("get_status", { message_id });
     return request(
       "GET",
       `/status/${encodeURIComponent(message_id)}`,
