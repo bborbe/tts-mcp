@@ -410,6 +410,7 @@ class ServerState:
             else:
                 targets = list(self._cancel_events)
 
+            playing: list[threading.Event] = []
             for mid in targets:
                 self._cancelled.add(mid)
                 event = self._cancel_events.get(mid)
@@ -417,18 +418,19 @@ class ServerState:
                     # Playing: the player writes the final status from its own
                     # thread once it stops, so it is never reported as stopped
                     # while audio is still coming out of the speakers.
-                    event.set()
+                    playing.append(event)
                     continue
-                self._mark_cancelled(mid)
-            return targets
+                # Queued: nothing will ever play it, so this is the final status.
+                queued = self.statuses.get(mid)
+                if queued is not None:
+                    queued.status = "cancelled"
+                    queued.completed_at = time.time()
 
-    def _mark_cancelled(self, message_id: str) -> None:
-        """Record a never-played message as cancelled. Caller holds the status lock."""
-        status = self.statuses.get(message_id)
-        if status is None:
-            return
-        status.status = "cancelled"
-        status.completed_at = time.time()
+        # Woken outside the lock: each event is independent once looked up, and
+        # the threads they wake take the same lock to report their final status.
+        for event in playing:
+            event.set()
+        return targets
 
     def mark_skipped(self, message_id: str) -> None:
         """Record a queued message the worker dropped without synthesizing it.
@@ -437,7 +439,10 @@ class ServerState:
             message_id: Message taken off the queue after it was cancelled.
         """
         with self._status_lock:
-            self._mark_cancelled(message_id)
+            status = self.statuses.get(message_id)
+            if status is not None:
+                status.status = "cancelled"
+                status.completed_at = time.time()
             self._cancelled.discard(message_id)
 
 

@@ -961,6 +961,11 @@ class TestServerAudioWorker:
         state = _make_state(stream=True)
         model = _model_of(state)
 
+        # No sleep or barrier is needed here, and adding one would only hide a
+        # regression: the generator body runs on the worker thread, inside the
+        # same next() call that play_stream is driving. So request_cancel has
+        # already returned before play_stream sees the second chunk and checks
+        # the event — the ordering is the generator protocol, not a race.
         def _generate(**_kwargs: Any) -> Any:
             yield MagicMock(audio=np.ones(100, dtype=np.float32))
             state.request_cancel(None, cancel_all=False)
