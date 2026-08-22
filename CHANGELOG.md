@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+
+- docs: the `voice` skill's `restart` procedure now distinguishes a dropped MCP tool binding from a stale audio device before restarting anything. Both present identically — voice simply stops — but only the device case is fixed by `launchctl kickstart`, and the old procedure assumed it: all four steps targeted the server. When the binding is what dropped, the restart "succeeds" (fresh process, `/health` returns `ok` in about a second) while `mcp__tts__say` is still missing, because the tool list belongs to the MCP client in the Claude Code session, not to the server process — so a green health check reads as a fix while the user still hears nothing. The skill now leads with a one-call triage (`No such tool available` → binding, restart Claude Code; a `message_id` returned but silence → device, restart the server) and documents the `POST /say` HTTP fallback that keeps speech working for the rest of a session whose binding has dropped. Observed 2026-08-22.
+
 ## v0.8.1
 
 ### Changed

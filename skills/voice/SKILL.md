@@ -54,10 +54,35 @@ When you actually need proof the audio path works — silence mid-session, a dev
 
 Use when audio silently stops after a device switch (AirPods connect, headphones unplug). The server is a launchd-supervised FastAPI process (`com.bborbe.tts-mcp`) that binds the default output device at init; a switch orphans it.
 
+### First: is it the server, or the tool binding?
+
+Silence has two causes that look identical from the user's side, and **only one of them is fixed by restarting the server**. Check this before running any of the steps below — it takes one call and saves restarting a process that was never broken.
+
+| What you observe | Cause | Fix |
+|---|---|---|
+| `mcp__tts__say` errors with `No such tool available` | The session's **MCP tool binding** dropped. The server is almost certainly fine. | Restart Claude Code, or start a new session. For the rest of the current session, reach the server over HTTP (below). |
+| `mcp__tts__say` **succeeds** (returns a `message_id`) but nothing is audible | The server bound a **stale audio device**. | The restart steps below. |
+
+A dropped binding does not heal on `launchctl kickstart` — the server respawns healthy, `/health` returns `ok`, and the tool is still missing, because the tool list is owned by the MCP client in the Claude Code session, not by the server process. Restarting into a green health check and declaring victory is the trap here: the check passes and the user still hears nothing.
+
+**HTTP fallback for the current session** — the server exposes the same endpoint the MCP tool wraps, so speech still works without the binding:
+
+```bash
+curl -s -X POST http://127.0.0.1:12000/say \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Okay. Tag here. Message.","voice":"ryan"}'
+```
+
+Returns the same `{"message_id": ..., "status": "queued"}` shape. Every rule in the speaking playbook below still applies — throwaway lead word, session tag, English, terse. Observed 2026-08-22: the binding dropped mid-session, `kickstart` + `/health` both came back clean, and this fallback was what actually restored audio.
+
+### Restart steps (stale-device case)
+
 1. `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp` (KeepAlive respawns a fresh process against the current default device).
 2. Poll health until ready — `curl -s http://127.0.0.1:12000/health`. `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag. Model reload is ~1-3s on `engine: qwen3`, ~15-20s on `engine: voxtral`.
 3. Verify: run `/tts-mcp:voice-selfcheck`.
 4. If still silent after restart, it's not the device binding — follow the troubleshooting steps in `/tts-mcp:voice-selfcheck` (server unreachable / stuck queue / synth error).
+
+If `/health` answers but you cannot call `mcp__tts__say` at all, stop restarting — re-read the table above; that is the binding case, not a server fault.
 
 Caveats: in-flight messages are dropped across a restart; message IDs reset; one server serves all Claude sessions, so a restart affects every session's relay.
 
