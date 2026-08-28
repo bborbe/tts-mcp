@@ -589,7 +589,7 @@ class StateResponse(BaseModel):
     is the number of messages still waiting to play.
     """
 
-    current: StatusResponse | None
+    current: StatusResponse | None = None
     recent: list[StatusResponse]
     queued: int
 
