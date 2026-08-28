@@ -21,16 +21,29 @@ A skill cannot force behavior across turns on its own — it sets the mode for t
 
 On invocation, confirm the new mode in one line (e.g. `🔊 voice: interview (ryan)` or `🔇 voice: off`).
 
-## Skipping what is being said
+## Skipping, pausing, resuming
 
 "Skip", "stop talking", "next", "cut it short" mean the current utterance, not voice mode — call `mcp__tts__cancel`
 with no arguments. Playback stops in ~100ms and the next queued message starts. Add `all: true` when the user wants the
 whole backlog gone ("shut up", "stop all of it"), and pass `message_id` only when a specific message was named. Do not
 turn voice `off` for a skip: the user is rejecting one utterance, not the mode.
 
+"Pause" / "hold that" / "stop talking but don't lose it" mean `mcp__tts__pause` — playback stops in ~100ms and resumes
+from the same point on `mcp__tts__resume`. A paused message stays cancellable. Pause is for "interrupt me but keep the
+rest of this utterance" — a meeting, a question — where skip would throw away audio the user still wants.
+
 An MCP call only lands when Claude is between tool calls, so it is the slow path. When the user complains that skipping
 arrives too late, point them at `scripts/tts-skip` in the tts-mcp repo (`make skip`) — one curl, bindable to a global
-hotkey (Raycast, macOS Shortcuts, skhd), which works no matter what any session is doing.
+hotkey (Raycast, macOS Shortcuts, skhd), which works no matter what any session is doing. `scripts/tts-pause` /
+`scripts/tts-resume` (`make pause` / `make resume`) are the same one-curl wrappers for pause/resume.
+
+## Sender field (who said this)
+
+Every `mcp__tts__say` call passes the session's tag as `sender` — the same 2–4 word tag that names the utterance
+(anchor task → parent goal → repo/service). The web UI (http://127.0.0.1:12000/) and `GET /state` then show which
+session said what, which matters once local and cloud sessions interleave. Sender is the tag, verbatim — never the
+session id or a full task title. When there is no anchor tag (untagged one-off speech), pass a short description of
+the work ("harness config", "inbox triage") just as the spoken tag does.
 
 ## Spoken confirmation on activation
 

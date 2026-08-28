@@ -301,11 +301,15 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+| GET | `/` | Web UI: message history + sender + pause/resume controls |
 | GET | `/health` | Liveness check |
 | GET | `/voices` | List available voices and default voice, plus per-engine grouping and load state |
 | POST | `/say` | Queue text for synthesis and playback (returns message ID) |
 | POST | `/cancel` | Stop the utterance that is playing (and optionally drop the queue behind it) |
-| GET | `/status/{message_id}` | Check status of a queued/loading/playing/completed message |
+| POST | `/pause` | Pause the utterance that is playing; resume later with `/resume` |
+| POST | `/resume` | Continue a paused utterance from exactly where it stopped |
+| GET | `/state` | What is playing/paused now, recent message history (with sender), queue depth |
+| GET | `/status/{message_id}` | Check status of a queued/loading/playing/paused/completed message |
 
 ### POST /say
 
@@ -314,7 +318,8 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
   "text": "Hello, this is a test.",
   "voice": "casual_female",
   "instruct": "Very happy and excited.",
-  "engine": "qwen3"
+  "engine": "qwen3",
+  "sender": "voice-anying"
 }
 ```
 
@@ -324,6 +329,10 @@ from the voice name. The first request for an engine whose model is not yet resi
 
 `instruct` is optional and only accepted by the `qwen3` engine; pairing it with another engine is rejected with a 400
 at request time rather than failing later inside the worker.
+
+`sender` is optional and names the session that produced the message (e.g. the Claude session tag). It is stored with
+the message and shown in the web UI and `/state`, so it is clear which session said what when several sessions
+interleave.
 
 Returns `202 Accepted` with a message ID and queue position. Audio plays through the server's speakers.
 
@@ -355,20 +364,62 @@ scripts/tts-skip --all    # stop it and drop the queue behind it
 `scripts/tts-skip` is a dependency-free curl wrapper meant for a global hotkey (Raycast, macOS Shortcuts, skhd), so a
 long utterance can be skipped without waiting for an AI agent to be idle enough to call the MCP tool.
 
+### POST /pause and POST /resume
+
+Both take an optional `message_id`; an empty body targets what is playing/paused right now.
+
+```bash
+curl -X POST http://127.0.0.1:12000/pause    -H 'Content-Type: application/json' -d '{}'
+curl -X POST http://127.0.0.1:12000/resume   -H 'Content-Type: application/json' -d '{}'
+```
+
+`/pause` holds the current utterance where it is; playback stops within ~100ms (between write slices) and resumes from
+the exact same point on `/resume`. A paused message is still cancellable — pause never blocks cancel. Pausing or
+resuming nothing is not an error: `{"paused": [], "queued": 0}` simply means there was nothing to act on. An unknown
+`message_id` is a 404.
+
+```bash
+scripts/tts-pause     # pause the current utterance (also: make pause)
+scripts/tts-resume    # resume it (also: make resume)
+```
+
+### GET /state
+
+Returns what is playing or paused right now, the recent message history (most recent first, with `sender`), and the
+queue depth — the data behind the web UI and the menu bar:
+
+```json
+{
+  "current": {"message_id": "msg_...", "status": "playing", "text": "...", "sender": "voice-anying"},
+  "recent": [{"message_id": "msg_...", "status": "completed", "text": "...", "sender": "voice-anying"}],
+  "queued": 2
+}
+```
+
+`current` is null when idle. `recent` holds up to 10 finished messages and expires with the 1-hour status TTL.
+
+### Web UI
+
+Serving `GET /` on the server is a small self-contained page that polls `/state` every 2s and shows the current
+status, the message history with senders, and Pause/Resume/Skip buttons. Open it at `http://127.0.0.1:12000/`.
+
 ### Message Lifecycle
 
 `queued` -> `playing` -> `completed` (with audio file path) or `error` (with error details). A message stopped through
 `/cancel` ends as `cancelled` instead, from either `queued` (never synthesized) or `playing` (stopped mid-utterance).
-Finished statuses expire after 1 hour.
+A message paused through `/pause` goes `playing` -> `paused` and back to `playing` on `/resume`; a cancel while paused
+still ends it as `cancelled`. Finished statuses expire after 1 hour.
 
 ## MCP Server
 
-The MCP server (`mcp/tts-mcp.ts`) is a transparent relay between MCP clients and the FastAPI server. It exposes four tools:
+The MCP server (`mcp/tts-mcp.ts`) is a transparent relay between MCP clients and the FastAPI server. It exposes six tools:
 
 | Tool | Description |
 |------|-------------|
-| `say` | Queue text for speech synthesis with a specified voice (optional `instruct` on qwen3) |
+| `say` | Queue text for speech synthesis with a specified voice (optional `instruct` on qwen3, optional `sender`) |
 | `cancel` | Stop the utterance that is playing, one named message, or the whole queue |
+| `pause` | Pause the utterance that is playing; resume from the same point with `resume` |
+| `resume` | Continue a paused utterance from exactly where it stopped |
 | `get_voices` | List all available voices |
 | `get_status` | Check status of a speech request by message ID |
 

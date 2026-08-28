@@ -16,6 +16,7 @@ from typing import cast
 import numpy as np
 import pyloudnorm as pyln
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from src.tts import (
@@ -45,7 +46,7 @@ logger = logging.getLogger("tts-server")
 
 STATUS_TTL_SECONDS: int = 3600
 
-CANCELLABLE_STATUSES: frozenset[str] = frozenset({"queued", "loading", "playing"})
+CANCELLABLE_STATUSES: frozenset[str] = frozenset({"queued", "loading", "playing", "paused"})
 """Statuses a message can still be cancelled from — everything not yet finished."""
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error", "cancelled"})
@@ -74,6 +75,7 @@ class MessageStatus:
     error: str | None
     completed_at: float | None
     engine: str | None = None
+    sender: str | None = None
 
 
 class ServerState:
@@ -144,6 +146,8 @@ class ServerState:
         self.engine_errors: dict[str, str] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._cancelled: set[str] = set()
+        self._pause_events: dict[str, threading.Event] = {}
+        self._paused: set[str] = set()
         self._loaded_engines: set[str] = set()
         self._status_lock = threading.Lock()
         self._counter = 0
@@ -342,38 +346,45 @@ class ServerState:
             for mid in expired:
                 del self.statuses[mid]
                 self._cancelled.discard(mid)
+                self._paused.discard(mid)
 
-    def begin_playback(self, message_id: str) -> threading.Event:
-        """Register the message the worker is about to play and hand back its cancel event.
+    def begin_playback(self, message_id: str) -> tuple[threading.Event, threading.Event]:
+        """Register the message the worker is about to play and hand back its cancel + pause events.
 
-        The event is created per message rather than kept on the player, so a
-        cancel that arrives just as one utterance ends can never silence the
-        next one: it is addressed to a message id, and an id is played once.
-        A message cancelled while it was still queued gets an already-set event,
-        so it is dropped the moment playback would have started.
+        The events are created per message rather than kept on the player, so a
+        cancel (or pause) that arrives just as one utterance ends can never
+        leak into the next one: they are addressed to a message id, and an id
+        is played once. A message cancelled while it was still queued gets an
+        already-set cancel event, so it is dropped the moment playback would
+        have started.
 
         Args:
             message_id: Message about to be played.
 
         Returns:
-            The cancel event for this message.
+            The (cancel, pause) events for this message.
         """
         with self._status_lock:
-            event = threading.Event()
+            cancel_event = threading.Event()
+            pause_event = threading.Event()
             if message_id in self._cancelled:
-                event.set()
-            self._cancel_events[message_id] = event
-            return event
+                cancel_event.set()
+            self._cancel_events[message_id] = cancel_event
+            self._pause_events[message_id] = pause_event
+            return cancel_event, pause_event
 
     def end_playback(self, message_id: str) -> None:
-        """Forget a message's cancel event once it is no longer playable.
+        """Forget a message's cancel + pause events once it is no longer playable.
 
         Args:
-            message_id: Message that finished, failed, or was cancelled.
+            message_id: Message that finished, failed, was cancelled, or paused
+                then cancelled.
         """
         with self._status_lock:
             self._cancel_events.pop(message_id, None)
+            self._pause_events.pop(message_id, None)
             self._cancelled.discard(message_id)
+            self._paused.discard(message_id)
 
     def is_cancelled(self, message_id: str) -> bool:
         """Report whether a message was cancelled before the worker reached it.
@@ -435,6 +446,69 @@ class ServerState:
             event.set()
         return targets
 
+    def request_pause(self, message_id: str | None) -> list[str]:
+        """Pause the playing message, or one named message.
+
+        A message that is playing is paused through its pause event, and the
+        player stops between write slices (~100ms). A queued message cannot be
+        paused (it has not started) and is ignored. Pausing nothing is not an
+        error — the response lists whatever was actually paused.
+
+        Args:
+            message_id: Message to pause, or None to pause what is playing now.
+
+        Returns:
+            The ids that were paused, in queue order. Empty when nothing was
+            playing.
+        """
+        with self._status_lock:
+            targets = ([message_id] if message_id in self._pause_events else []) if message_id is not None else list(self._pause_events)
+
+            playing: list[threading.Event] = []
+            for mid in targets:
+                self._paused.add(mid)
+                event = self._pause_events.get(mid)
+                if event is not None:
+                    playing.append(event)
+                ms = self.statuses.get(mid)
+                if ms is not None:
+                    ms.status = "paused"
+
+        for event in playing:
+            event.set()
+        return targets
+
+    def request_resume(self, message_id: str | None) -> list[str]:
+        """Resume the paused message, or one named message.
+
+        Mirrors request_pause: the pause event is cleared and the player picks
+        up exactly where it stopped (between write slices). A message that is
+        not paused is ignored; resuming nothing is not an error.
+
+        Args:
+            message_id: Message to resume, or None to resume what is paused now.
+
+        Returns:
+            The ids that were resumed, in queue order. Empty when nothing was
+            paused.
+        """
+        with self._status_lock:
+            targets = ([message_id] if message_id in self._paused else []) if message_id is not None else list(self._paused)
+
+            paused: list[threading.Event] = []
+            for mid in targets:
+                self._paused.discard(mid)
+                event = self._pause_events.get(mid)
+                if event is not None:
+                    paused.append(event)
+                ms = self.statuses.get(mid)
+                if ms is not None:
+                    ms.status = "playing"
+
+        for event in paused:
+            event.clear()
+        return targets
+
     def mark_skipped(self, message_id: str) -> None:
         """Record a queued message the worker dropped without synthesizing it.
 
@@ -456,6 +530,7 @@ class SayRequest(BaseModel):
     voice: str | None = None
     instruct: str | None = None
     engine: str | None = None
+    sender: str | None = None
 
 
 class SayResponse(BaseModel):
@@ -480,6 +555,19 @@ class CancelResponse(BaseModel):
     queued: int
 
 
+class PauseRequest(BaseModel):
+    """Request body for POST /pause and POST /resume. Empty body targets what is playing/paused."""
+
+    message_id: str | None = None
+
+
+class PauseResponse(BaseModel):
+    """Response body for POST /pause and POST /resume."""
+
+    paused: list[str]
+    queued: int
+
+
 class StatusResponse(BaseModel):
     """Response body for GET /status/{message_id}."""
 
@@ -489,6 +577,21 @@ class StatusResponse(BaseModel):
     audio_file: str | None = None
     error: str | None = None
     engine: str | None = None
+    sender: str | None = None
+
+
+class StateResponse(BaseModel):
+    """Response body for GET /state — the current playback, recent history, and queue depth.
+
+    ``current`` is the message that is playing or paused right now (or None when
+    idle). ``recent`` is the tail of finished messages, most recent first, so a
+    UI can show "what was said and by whom" without polling every id. ``queued``
+    is the number of messages still waiting to play.
+    """
+
+    current: StatusResponse | None
+    recent: list[StatusResponse]
+    queued: int
 
 
 class EngineVoices(BaseModel):
@@ -525,6 +628,15 @@ class HealthResponse(BaseModel):
 
 
 router = APIRouter()
+
+
+@router.get("/")
+def web_ui() -> FileResponse:
+    """Serve the web UI (message history + sender + pause/resume controls)."""
+    ui_path = Path(__file__).resolve().parent.parent / "web" / "index.html"
+    if not ui_path.exists():
+        raise HTTPException(status_code=404, detail="web/index.html not found")
+    return FileResponse(ui_path)
 
 
 @router.get("/health")
@@ -619,6 +731,7 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             error=None,
             completed_at=None,
             engine=engine,
+            sender=body.sender,
         )
 
     state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct, engine=engine))
@@ -658,6 +771,88 @@ def cancel(request: Request, body: CancelRequest | None = None) -> CancelRespons
     return CancelResponse(cancelled=cancelled, queued=state.work_queue.qsize())
 
 
+@router.post("/pause")
+def pause(request: Request, body: PauseRequest | None = None) -> PauseResponse:
+    """Hold the message that is playing where it is; resume later with POST /resume.
+
+    With no body the message currently playing is paused. With ``message_id``
+    only that message is paused. A paused message is still cancellable (the
+    pause never blocks a cancel). Pausing nothing is not an error.
+    """
+    state: ServerState = request.app.state.server
+    args = body if body is not None else PauseRequest()
+
+    if args.message_id is not None:
+        with state.status_lock:
+            known = args.message_id in state.statuses
+        if not known:
+            raise HTTPException(status_code=404, detail=f"Unknown message ID: {args.message_id}")
+
+    paused = state.request_pause(args.message_id)
+    logger.debug("POST /pause paused %s", paused)
+
+    return PauseResponse(paused=paused, queued=state.work_queue.qsize())
+
+
+@router.post("/resume")
+def resume(request: Request, body: PauseRequest | None = None) -> PauseResponse:
+    """Continue a paused message from exactly where it stopped.
+
+    With no body the message currently paused is resumed. With ``message_id``
+    only that message is resumed. Resuming nothing is not an error.
+    """
+    state: ServerState = request.app.state.server
+    args = body if body is not None else PauseRequest()
+
+    if args.message_id is not None:
+        with state.status_lock:
+            known = args.message_id in state.statuses
+        if not known:
+            raise HTTPException(status_code=404, detail=f"Unknown message ID: {args.message_id}")
+
+    resumed = state.request_resume(args.message_id)
+    logger.debug("POST /resume resumed %s", resumed)
+
+    return PauseResponse(paused=resumed, queued=state.work_queue.qsize())
+
+
+@router.get("/state")
+def state_endpoint(request: Request) -> StateResponse:
+    """Report what is playing/paused now, the recent message history, and the queue depth."""
+    state: ServerState = request.app.state.server
+
+    state.evict_expired()
+
+    with state.status_lock:
+        current: MessageStatus | None = None
+        for ms in state.statuses.values():
+            if ms.status in ("playing", "paused"):
+                current = ms
+                break
+        recent_msgs = sorted(
+            (ms for ms in state.statuses.values() if ms.completed_at is not None),
+            key=lambda ms: ms.completed_at or 0.0,
+            reverse=True,
+        )[:10]
+
+        def to_response(ms: MessageStatus) -> StatusResponse:
+            return StatusResponse(
+                message_id=ms.message_id,
+                status=ms.status,
+                text=ms.text,
+                audio_file=ms.audio_file,
+                error=ms.error,
+                engine=ms.engine,
+                sender=ms.sender,
+            )
+
+        return StateResponse(
+            current=to_response(current) if current is not None else None,
+            recent=[to_response(ms) for ms in recent_msgs],
+            queued=state.work_queue.qsize(),
+        )
+
+
 @router.get("/status/{message_id}")
 def status(request: Request, message_id: str) -> StatusResponse:
     """Check the status of a queued/playing/completed message."""
@@ -678,6 +873,7 @@ def status(request: Request, message_id: str) -> StatusResponse:
         audio_file=ms.audio_file,
         error=ms.error,
         engine=ms.engine,
+        sender=ms.sender,
     )
 
 
@@ -727,7 +923,7 @@ def _start_playback(
     done = threading.Event()
     on_complete, on_error, on_cancel = _playback_status_callbacks(state, work_item, done)
 
-    cancel = state.begin_playback(work_item.message_id)
+    cancel, pause = state.begin_playback(work_item.message_id)
     with state.status_lock:
         state.statuses[work_item.message_id].status = "playing"
 
@@ -740,6 +936,7 @@ def _start_playback(
             on_error=on_error,
             on_cancel=on_cancel,
             cancel=cancel,
+            pause=pause,
         )
     )
     return done
@@ -931,7 +1128,7 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
                 state.work_queue.task_done()
                 continue
 
-            cancel = state.begin_playback(item.message_id)
+            cancel, pause = state.begin_playback(item.message_id)
             with state.status_lock:
                 state.statuses[item.message_id].status = "playing"
 
@@ -948,6 +1145,7 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
                     on_error,
                     on_cancel=on_cancel,
                     cancel=cancel,
+                    pause=pause,
                 )
             except (RuntimeError, ValueError) as exc:
                 logger.error("TTS generation failed for %s: %s", item.message_id, exc)

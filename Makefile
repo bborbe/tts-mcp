@@ -30,6 +30,16 @@ chat:
 skip:
 	bash scripts/tts-skip
 
+.PHONY: pause
+# Pause the utterance that is playing; resume later with make resume
+pause:
+	bash scripts/tts-pause
+
+.PHONY: resume
+# Resume the utterance that was paused with make pause
+resume:
+	bash scripts/tts-resume
+
 .PHONY: download
 # Download a Voxtral TTS model into data/models/
 download:

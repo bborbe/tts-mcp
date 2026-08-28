@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- feat: speech can now be paused and resumed. `POST /pause` and `POST /resume` (plus the `pause`/`resume` MCP tools and `scripts/tts-pause`/`scripts/tts-resume`, aka `make pause`/`make resume`) hold the current utterance where it is and continue from the exact same point — no position bookkeeping, the player simply stops writing between its ~100ms slices. Pause never blocks cancel: a paused message stays cancellable, and a cancel lands within one slice even while paused. This closes the gap the skip-cancel work (v0.8.0) left open: stale narration could be skipped but not temporarily held, so a message that suddenly matters either played over the interruption or was lost entirely.
+- feat: messages are now attributable. `POST /say` (and the `say` MCP tool) accept an optional `sender`, stored on the message and surfaced in `GET /status/{id}` and the new `GET /state`. The `voice` skill auto-tags every utterance with the session tag, so with several local and cloud sessions interleaving it is clear which session said what.
+- feat: a `GET /state` endpoint reports what is playing/paused now, the recent message history (with sender), and the queue depth — the data behind both new surfaces.
+- feat: a small web UI served at `/` on the server (open `http://127.0.0.1:12000/`) polls `/state` and shows the current status, message history with senders, and Pause/Resume/Skip buttons.
+- feat: a Hammerspoon menu bar module (`~/.hammerspoon/tts.lua`) polls `/state` and offers a Pause/Resume toggle, the current/last message and sender, and a link to open the web UI — quick control without dropping into a terminal or waiting for an agent to be idle.
+
 ## v0.8.2
 
 ### Changed
