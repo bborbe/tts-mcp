@@ -57,8 +57,26 @@
       cursor: pointer;
       margin-top: 12px;
     }
-    button:disabled { opacity: 0.45; cursor: default; }
+    /* A disabled control must not look pressable. At opacity .45 the accent
+       blue still read as live, the cursor stayed default, and the click was
+       swallowed with no feedback — so pressing Pause while idle was
+       indistinguishable from a broken Pause. Reported 2026-08-29. */
+    button:disabled {
+      background: var(--border);
+      color: var(--muted);
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     button.secondary { background: var(--border); }
+    button.replay {
+      margin-top: 0;
+      margin-left: auto;
+      padding: 3px 10px;
+      font-size: 12px;
+      font-weight: 500;
+      background: var(--border);
+      color: var(--text);
+    }
     .history-item {
       padding: 10px 0;
       border-bottom: 1px solid var(--border);
@@ -107,6 +125,28 @@
       poll();
     }
 
+    async function replay(m) {
+      if (!m || !m.text) return;
+      // voice/engine come from the recorded message so the replay sounds like the
+      // original. sender is prefixed rather than reused verbatim, so history stays
+      // honest about which entries were replays.
+      const body = {
+        text: m.text,
+        voice: m.voice || null,
+        engine: m.engine || null,
+        sender: m.sender ? "replay · " + m.sender : "replay",
+      };
+      const res = await fetch("/say", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        $("conn").textContent = "replay failed: HTTP " + res.status;
+      }
+      poll();
+    }
+
     function render(data) {
       const cur = data.current;
       $("dot").className = "dot" + (cur ? " " + cur.status : "");
@@ -125,16 +165,24 @@
         history.innerHTML = '<div class="empty">No messages yet.</div>';
         return;
       }
-      history.innerHTML = data.recent.map((m) => {
+      history.innerHTML = data.recent.map((m, i) => {
         const sender = m.sender ? " · " + m.sender : "";
         const badge = '<span class="badge ' + m.status + '">' + m.status + "</span>";
         return (
           '<div class="history-item">' +
-            '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span><span>" + sender + "</span></div>" +
+            '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span><span>" + sender + "</span>" +
+              '<button class="replay" data-i="' + i + '" title="Speak this message again">Replay</button>' +
+            "</div>" +
             '<div class="history-text">' + escapeHtml(m.text) + "</div>" +
           "</div>"
         );
       }).join("");
+      // Bound by index into the payload we just rendered, so the exact text /
+      // voice / engine that produced this entry is replayed — not a re-derived
+      // guess, and not whatever the defaults happen to be at replay time.
+      history.querySelectorAll("button.replay").forEach((btn) => {
+        btn.addEventListener("click", () => replay(data.recent[Number(btn.dataset.i)]));
+      });
     }
 
     function escapeHtml(s) {
