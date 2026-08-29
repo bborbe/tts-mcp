@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.11.0
 
 - feat(server): `GET /state` now returns a `pending` list — messages accepted by `POST /say` that are queued/loading but not yet finished, oldest first, capped at 25 (same `RECENT_HISTORY_LIMIT` as `recent`). A message is now visible in the web UI from the moment it is accepted, instead of being invisible until playback starts (`recent` only held completed messages and `queued` was just a count). Replays are excluded for consistency with `recent`.
 - feat(web): the history list now renders three distinct lifecycle states with separate badges — **queued**, **playing**, **played** — so what is waiting, what is speaking, and what has been said are legible at a glance. Each entry carries its state from `/say` acceptance onward.
