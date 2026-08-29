@@ -878,6 +878,38 @@ class TestPause:
 
         assert response.status_code == 404
 
+    def test_pause_with_nothing_playing_arms_the_hold(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause")
+
+        assert response.status_code == 200
+        assert state.is_held()
+        assert client.get("/state").json()["paused"] is True
+
+    def test_pause_arms_hold_and_pauses_current(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        _, pause = state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause")
+
+        assert response.json()["paused"] == ["msg_playing"]
+        assert pause.is_set()
+        assert state.is_held()
+
+    def test_named_pause_does_not_arm_the_hold(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        client.post("/pause", json={"message_id": "msg_playing"})
+
+        assert not state.is_held()
+
 
 class TestResume:
     """Tests for POST /resume."""
@@ -937,6 +969,29 @@ class TestResume:
         response = client.post("/resume", json={"message_id": "msg_nope"})
 
         assert response.status_code == 404
+
+    def test_resume_clears_the_hold_even_when_nothing_paused(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        client.post("/pause")
+        assert state.is_held()
+        response = client.post("/resume")
+
+        assert response.status_code == 200
+        assert not state.is_held()
+        assert client.get("/state").json()["paused"] is False
+
+    def test_named_resume_does_not_clear_the_hold(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_paused", status="paused")
+        state.begin_playback("msg_paused")
+        client = TestClient(_make_app(state))
+
+        client.post("/pause")
+        client.post("/resume", json={"message_id": "msg_paused"})
+
+        assert state.is_held()
 
 
 class TestReplayHistory:
@@ -1063,6 +1118,63 @@ class TestState:
 
         assert data["current"]["message_id"] == "msg_playing"
         assert data["recent"] == []
+
+    def test_pending_lists_queued_and_loading_messages_oldest_first(self) -> None:
+        state = _make_state()
+        # Insert in FIFO order; the status dict preserves insertion order.
+        _queue_status(state, "msg_first", status="queued")
+        _queue_status(state, "msg_second", status="loading")
+        client = TestClient(_make_app(state))
+
+        pending = client.get("/state").json()["pending"]
+
+        assert [m["message_id"] for m in pending] == ["msg_first", "msg_second"]
+        assert [m["status"] for m in pending] == ["queued", "loading"]
+
+    def test_pending_excludes_completed_messages(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_queued")
+        _queue_status(state, "msg_done", status="completed")
+        with state.status_lock:
+            state.statuses["msg_done"].completed_at = time.time()
+        client = TestClient(_make_app(state))
+
+        data = client.get("/state").json()
+
+        assert [m["message_id"] for m in data["pending"]] == ["msg_queued"]
+        assert [m["message_id"] for m in data["recent"]] == ["msg_done"]
+
+    def test_pending_excludes_replays(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_replay")
+        with state.status_lock:
+            state.statuses["msg_replay"].is_replay = True
+        _queue_status(state, "msg_normal")
+        client = TestClient(_make_app(state))
+
+        pending = client.get("/state").json()["pending"]
+
+        assert [m["message_id"] for m in pending] == ["msg_normal"]
+
+    def test_pending_is_capped_at_recent_limit(self) -> None:
+        state = _make_state()
+        for i in range(RECENT_HISTORY_LIMIT + 5):
+            _queue_status(state, f"msg_{i:03d}")
+        client = TestClient(_make_app(state))
+
+        pending = client.get("/state").json()["pending"]
+
+        assert len(pending) == RECENT_HISTORY_LIMIT
+        # The oldest 25 stay — those are next to play, the useful view. Newer
+        # entries past the cap roll off the displayed window.
+        assert pending[0]["message_id"] == "msg_000"
+        assert pending[-1]["message_id"] == f"msg_{RECENT_HISTORY_LIMIT - 1:03d}"
+
+    def test_idle_hold_is_reported_as_paused_false(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        assert client.get("/state").json()["paused"] is False
 
 
 class TestSender:

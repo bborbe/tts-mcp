@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat(server): `GET /state` now returns a `pending` list — messages accepted by `POST /say` that are queued/loading but not yet finished, oldest first, capped at 25 (same `RECENT_HISTORY_LIMIT` as `recent`). A message is now visible in the web UI from the moment it is accepted, instead of being invisible until playback starts (`recent` only held completed messages and `queued` was just a count). Replays are excluded for consistency with `recent`.
+- feat(web): the history list now renders three distinct lifecycle states with separate badges — **queued**, **playing**, **played** — so what is waiting, what is speaking, and what has been said are legible at a glance. Each entry carries its state from `/say` acceptance onward.
+- feat(server,web): **Pause now works even when nothing is playing.** `POST /pause` with no `message_id` arms a queue-wide hold — even at idle — and the audio worker does not start new playback while it is armed, so messages accepted during the hold stay queued. `POST /resume` clears the hold and the backlog plays through. `GET /state` reports the hold as `paused: true`, and the web UI shows it at idle (Pause enabled, Resume restores).
+
 ## v0.10.1
 
 - fix(skill): The `voice` skill now states the `sender` rule as an imperative playbook rule ("Pass `sender` on every call, no exceptions") alongside the other always-rules, instead of describing it in a standalone section. The field shipped working in v0.9.0 and was still null on essentially every real message: the session that authored the descriptive section did not pass `sender` on a single one of its own `say()` calls, while following every imperative rule in the same file. Wording was the whole defect.
