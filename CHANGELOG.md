@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.10.1
 
 - fix(skill): The `voice` skill now states the `sender` rule as an imperative playbook rule ("Pass `sender` on every call, no exceptions") alongside the other always-rules, instead of describing it in a standalone section. The field shipped working in v0.9.0 and was still null on essentially every real message: the session that authored the descriptive section did not pass `sender` on a single one of its own `say()` calls, while following every imperative rule in the same file. Wording was the whole defect.
 - fix(web): A message with no `sender` now renders as `unknown` in both the current-message header and the history entries, instead of rendering nothing. A blank was indistinguishable from "the field does not exist", so the attribution gap above hid itself for two releases.
