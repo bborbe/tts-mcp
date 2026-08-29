@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- fix(skill): The `voice` skill now states the `sender` rule as an imperative playbook rule ("Pass `sender` on every call, no exceptions") alongside the other always-rules, instead of describing it in a standalone section. The field shipped working in v0.9.0 and was still null on essentially every real message: the session that authored the descriptive section did not pass `sender` on a single one of its own `say()` calls, while following every imperative rule in the same file. Wording was the whole defect.
+- fix(web): A message with no `sender` now renders as `unknown` in both the current-message header and the history entries, instead of rendering nothing. A blank was indistinguishable from "the field does not exist", so the attribution gap above hid itself for two releases.
+- fix(web,server): Replaying a message no longer adds it to the recent-message history. `POST /say` accepts a `replay` flag, `MessageStatus` carries `is_replay`, and `GET /state` filters marked messages out of `recent`. A replay is the same utterance heard again, not a new message — and re-listing it let replays evict the very messages the listener was replaying to catch up on. Playback, attribution (`replay · <sender>`) and `GET /status/{id}` are unchanged: the replay still really happened and is still individually reachable.
+
 ## v0.10.0
 
 - feat: Add a **Replay** button to each recent-message entry — re-queues that message with its recorded `text`, `voice`, and `engine`, so it sounds like the original rather than falling back to whatever the defaults are at replay time. `MessageStatus` and `StatusResponse` now carry the resolved `voice` (only `engine` and `sender` were tracked before), which is what makes a faithful replay possible. The replay is attributed as `replay · <sender>` so history stays honest about which entries were replays.
