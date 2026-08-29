@@ -85,6 +85,8 @@
     .history-item:last-child { border-bottom: none; }
     .history-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
     .badge { border-radius: 4px; padding: 1px 7px; font-size: 11px; text-transform: uppercase; font-weight: 600; }
+    .badge.queued { background: rgba(240, 180, 41, 0.15); color: var(--paused); }
+    .badge.playing { background: rgba(79, 140, 255, 0.15); color: var(--accent); }
     .badge.completed { background: rgba(56, 193, 114, 0.15); color: var(--completed); }
     .badge.error { background: rgba(229, 91, 91, 0.15); color: var(--error); }
     .badge.cancelled { background: rgba(160, 160, 160, 0.15); color: var(--cancelled); }
@@ -154,42 +156,76 @@
       poll();
     }
 
+    // One icon per lifecycle state, rendered in the history list so a message
+    // is visible from /say acceptance (queued) through playback (playing) to
+    // completion (played). Map the server's status word to the user-facing label.
+    const STATE_LABEL = {
+      queued: "queued",
+      loading: "queued",
+      playing: "playing",
+      paused: "playing",
+      completed: "played",
+      error: "error",
+      cancelled: "cancelled",
+    };
+
+    function renderRow(m, replayIndex) {
+      const label = STATE_LABEL[m.status] || m.status;
+      const badge = '<span class="badge ' + (label === "played" ? "completed" : label) + '">' + label + "</span>";
+      const sender = " · " + (m.sender || UNKNOWN_SENDER);
+      const replay = replayIndex !== undefined
+        ? '<button class="replay" data-i="' + replayIndex + '" title="Speak this message again">Replay</button>'
+        : "";
+      return (
+        '<div class="history-item">' +
+          '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span><span>" + sender + "</span>" + replay +
+          "</div>" +
+          '<div class="history-text">' + escapeHtml(m.text) + "</div>" +
+        "</div>"
+      );
+    }
+
     function render(data) {
       const cur = data.current;
-      $("dot").className = "dot" + (cur ? " " + cur.status : "");
-      $("status").textContent = cur ? cur.status : "idle";
+      const held = !!data.paused;
+      const paused = cur && cur.status === "paused";
+      const playing = cur && cur.status === "playing";
+
+      // The hold is visible even at idle: Pause armed with nothing playing shows
+      // as paused here so the armed queue-wide hold is not silent.
+      const headerStatus = cur ? cur.status : (held ? "paused" : "idle");
+      $("dot").className = "dot" + (headerStatus !== "idle" ? " " + headerStatus : "");
+      $("status").textContent = headerStatus;
       // A missing sender is rendered explicitly, never as blank: an empty string is
       // indistinguishable from "no sender field at all", which is how the attribution
       // gap stayed invisible after the field shipped.
       $("sender").textContent = cur ? (cur.sender || UNKNOWN_SENDER) : "";
       $("current-text").textContent = cur ? cur.text : "Nothing playing";
 
-      const paused = cur && cur.status === "paused";
-      const playing = cur && cur.status === "playing";
-      $("toggle").disabled = !paused && !playing;
-      $("toggle").textContent = paused ? "Resume" : "Pause";
+      // Pause always works — even with nothing playing it arms the queue-wide
+      // hold, and Resume clears it. Skip only makes sense mid-playback.
+      $("toggle").disabled = false;
+      $("toggle").textContent = (paused || held) ? "Resume" : "Pause";
       $("skip").disabled = !playing && !paused;
 
       const history = $("history");
-      if (!data.recent || data.recent.length === 0) {
+      const pending = data.pending || [];
+      const recent = data.recent || [];
+      if (pending.length === 0 && recent.length === 0 && !cur) {
         history.innerHTML = '<div class="empty">No messages yet.</div>';
         return;
       }
-      history.innerHTML = data.recent.map((m, i) => {
-        const sender = " · " + (m.sender || UNKNOWN_SENDER);
-        const badge = '<span class="badge ' + m.status + '">' + m.status + "</span>";
-        return (
-          '<div class="history-item">' +
-            '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span><span>" + sender + "</span>" +
-              '<button class="replay" data-i="' + i + '" title="Speak this message again">Replay</button>' +
-            "</div>" +
-            '<div class="history-text">' + escapeHtml(m.text) + "</div>" +
-          "</div>"
-        );
-      }).join("");
-      // Bound by index into the payload we just rendered, so the exact text /
-      // voice / engine that produced this entry is replayed — not a re-derived
-      // guess, and not whatever the defaults happen to be at replay time.
+      // Queued messages first (oldest queued on top), then the current message,
+      // then played history. Each entry carries its state badge; Replay is only
+      // meaningful on a finished (played/error/cancelled) entry.
+      const rows = pending.map((m) => renderRow(m));
+      if (cur) rows.push(renderRow(cur));
+      rows.push(...recent.map((m, i) => renderRow(m, i)));
+      history.innerHTML = rows.join("");
+      // Bound by index into the recent payload we just rendered, so the exact
+      // text / voice / engine that produced this entry is replayed — not a
+      // re-derived guess, and not whatever the defaults happen to be at replay
+      // time.
       history.querySelectorAll("button.replay").forEach((btn) => {
         btn.addEventListener("click", () => replay(data.recent[Number(btn.dataset.i)]));
       });

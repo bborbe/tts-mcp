@@ -41,6 +41,7 @@ from src.tts import (
     start_output_device_change_watcher,
     streaming_chunk_iter,
 )
+from src.tts.player import WRITE_SLICE_SECONDS
 
 logger = logging.getLogger("tts-server")
 
@@ -172,6 +173,11 @@ class ServerState:
         self._cancelled: set[str] = set()
         self._pause_events: dict[str, threading.Event] = {}
         self._paused: set[str] = set()
+        # Queue-wide hold armed by POST /pause with no message_id, even when
+        # nothing is playing: while set, the audio worker does not start new
+        # playback, so messages accepted via /say stay queued until POST /resume
+        # clears it. Distinct from the per-message pause above.
+        self._hold: threading.Event = threading.Event()
         self._loaded_engines: set[str] = set()
         self._status_lock = threading.Lock()
         self._counter = 0
@@ -422,6 +428,28 @@ class ServerState:
         with self._status_lock:
             return message_id in self._cancelled
 
+    def is_held(self) -> bool:
+        """Report whether the queue-wide hold is armed.
+
+        Armed by POST /pause with no message_id — even when nothing is playing.
+        While held the audio worker does not start new playback, so messages
+        accepted via /say stay queued until POST /resume clears the hold.
+
+        Returns:
+            True while the hold is armed.
+        """
+        return self._hold.is_set()
+
+    def wait_while_held(self) -> None:
+        """Block the caller until the queue-wide hold is cleared.
+
+        Called by the audio worker before beginning new playback: while the
+        hold is armed the worker parks here (in ~100ms slices so a resume is
+        picked up promptly) and new messages stay queued behind it.
+        """
+        while self._hold.is_set():
+            self._hold.wait(WRITE_SLICE_SECONDS)
+
     def request_cancel(self, message_id: str | None, cancel_all: bool) -> list[str]:
         """Cancel the playing message, one named message, or everything in flight.
 
@@ -478,6 +506,10 @@ class ServerState:
         paused (it has not started) and is ignored. Pausing nothing is not an
         error — the response lists whatever was actually paused.
 
+        With no ``message_id`` the pause also arms the queue-wide hold, so
+        pressing Pause when nothing is playing still gates the queue: messages
+        accepted afterwards stay queued until POST /resume clears it.
+
         Args:
             message_id: Message to pause, or None to pause what is playing now.
 
@@ -498,6 +530,9 @@ class ServerState:
                 if ms is not None:
                     ms.status = "paused"
 
+            if message_id is None:
+                self._hold.set()
+
         for event in playing:
             event.set()
         return targets
@@ -508,6 +543,9 @@ class ServerState:
         Mirrors request_pause: the pause event is cleared and the player picks
         up exactly where it stopped (between write slices). A message that is
         not paused is ignored; resuming nothing is not an error.
+
+        With no ``message_id`` the resume also clears the queue-wide hold armed
+        by a no-target pause, so the queued backlog plays through again.
 
         Args:
             message_id: Message to resume, or None to resume what is paused now.
@@ -528,6 +566,9 @@ class ServerState:
                 ms = self.statuses.get(mid)
                 if ms is not None:
                     ms.status = "playing"
+
+            if message_id is None:
+                self._hold.clear()
 
         for event in paused:
             event.clear()
@@ -610,17 +651,22 @@ class StatusResponse(BaseModel):
 
 
 class StateResponse(BaseModel):
-    """Response body for GET /state — the current playback, recent history, and queue depth.
+    """Response body for GET /state — the current playback, recent history, pending queue, and queue depth.
 
     ``current`` is the message that is playing or paused right now (or None when
-    idle). ``recent`` is the tail of finished messages, most recent first, so a
-    UI can show "what was said and by whom" without polling every id. ``queued``
-    is the number of messages still waiting to play.
+    idle). ``pending`` is the list of accepted-but-not-finished messages (status
+    ``queued``/``loading``), oldest first, so a UI can show what is queued before
+    it starts playing; ``recent`` is the tail of finished messages, most recent
+    first, so a UI can show "what was said and by whom" without polling every id.
+    ``queued`` is the number of messages still waiting to play. ``paused`` reports
+    the queue-wide hold armed by POST /pause with no target — true even at idle.
     """
 
     current: StatusResponse | None = None
+    pending: list[StatusResponse]
     recent: list[StatusResponse]
     queued: int
+    paused: bool = False
 
 
 class EngineVoices(BaseModel):
@@ -860,6 +906,12 @@ def state_endpoint(request: Request) -> StateResponse:
             if ms.status in ("playing", "paused"):
                 current = ms
                 break
+        # Accepted-but-not-finished messages, oldest first (dict preserves
+        # insertion order = FIFO). Capped like recent so a chatty burst can't
+        # grow the page unbounded. Replays excluded for consistency with recent.
+        pending_msgs = [ms for ms in state.statuses.values() if ms.status in ("queued", "loading") and not ms.is_replay][
+            :RECENT_HISTORY_LIMIT
+        ]
         recent_msgs = sorted(
             (ms for ms in state.statuses.values() if ms.completed_at is not None and not ms.is_replay),
             key=lambda ms: ms.completed_at or 0.0,
@@ -880,8 +932,10 @@ def state_endpoint(request: Request) -> StateResponse:
 
         return StateResponse(
             current=to_response(current) if current is not None else None,
+            pending=[to_response(ms) for ms in pending_msgs],
             recent=[to_response(ms) for ms in recent_msgs],
             queued=state.work_queue.qsize(),
+            paused=state.is_held(),
         )
 
 
@@ -1155,6 +1209,13 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
                 state.work_queue.task_done()
                 continue
 
+            # Queue-wide hold: while POST /pause (no target) is armed, new
+            # playback waits here so messages accepted via /say stay queued.
+            state.wait_while_held()
+            if _skip_if_cancelled(state, item):
+                state.work_queue.task_done()
+                continue
+
             loaded = _resolve_engine(state, item)
             if loaded is None:
                 state.work_queue.task_done()
@@ -1237,6 +1298,9 @@ def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
     while True:
         current_item: WorkItem | None = None
         try:
+            # Queue-wide hold: while POST /pause (no target) is armed, playback
+            # of an already-synthesized item waits here instead of starting.
+            state.wait_while_held()
             if pending is not None:
                 playback_done = _start_playback(state, player, pending, playback_done)
                 pending = None
