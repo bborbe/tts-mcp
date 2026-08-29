@@ -44,10 +44,25 @@ from src.tts import (
 
 logger = logging.getLogger("tts-server")
 
-STATUS_TTL_SECONDS: int = 3600
+# How long a finished message's status survives before evict_expired() drops it.
+# This is the real ceiling on replayable history: the web UI renders a Replay
+# button per entry in GET /state, so a message that has been evicted cannot be
+# replayed — its text, voice and engine are gone from memory. Raised from 1h to
+# 24h on 2026-08-29 so a full working day stays replayable; MessageStatus holds
+# only short strings, so even a chatty day costs a few hundred KB.
+STATUS_TTL_SECONDS: int = 24 * 60 * 60
 
 CANCELLABLE_STATUSES: frozenset[str] = frozenset({"queued", "loading", "playing", "paused"})
 """Statuses a message can still be cancelled from — everything not yet finished."""
+
+RECENT_HISTORY_LIMIT: int = 25
+"""How many finished messages GET /state returns, newest first.
+
+The web UI renders one Replay button per entry, so this is also how far back a
+message stays re-speakable. Raised from 10 on 2026-08-29 because 10 covers only a
+few minutes of a chatty session. Note STATUS_TTL_SECONDS is the harder ceiling:
+an evicted message has no entry regardless of this value.
+"""
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error", "cancelled"})
 """Statuses that are final: once reported, nothing may overwrite them."""
@@ -76,6 +91,10 @@ class MessageStatus:
     completed_at: float | None
     engine: str | None = None
     sender: str | None = None
+    # Resolved voice (after the default-voice fallback), not the raw request value.
+    # Carried so a replay re-speaks in the voice the listener actually heard rather
+    # than whatever the default happens to be at replay time.
+    voice: str | None = None
 
 
 class ServerState:
@@ -578,6 +597,7 @@ class StatusResponse(BaseModel):
     error: str | None = None
     engine: str | None = None
     sender: str | None = None
+    voice: str | None = None
 
 
 class StateResponse(BaseModel):
@@ -732,6 +752,7 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             completed_at=None,
             engine=engine,
             sender=body.sender,
+            voice=voice,
         )
 
     state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct, engine=engine))
@@ -833,7 +854,7 @@ def state_endpoint(request: Request) -> StateResponse:
             (ms for ms in state.statuses.values() if ms.completed_at is not None),
             key=lambda ms: ms.completed_at or 0.0,
             reverse=True,
-        )[:10]
+        )[:RECENT_HISTORY_LIMIT]
 
         def to_response(ms: MessageStatus) -> StatusResponse:
             return StatusResponse(
@@ -844,6 +865,7 @@ def state_endpoint(request: Request) -> StateResponse:
                 error=ms.error,
                 engine=ms.engine,
                 sender=ms.sender,
+                voice=ms.voice,
             )
 
         return StateResponse(

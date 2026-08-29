@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.server import (
+    RECENT_HISTORY_LIMIT,
     STATUS_TTL_SECONDS,
     MessageStatus,
     ServerState,
@@ -1751,3 +1752,66 @@ class TestTextPipelineIntegration:
         item = state.work_queue.get_nowait()
         assert item is not None
         assert item.text == "Hello world. How are you."
+
+
+class TestReplaySupport:
+    """The two things the Replay button depends on, each locked by its own test.
+
+    Both shipped in the same change and neither had coverage: the reviewer of
+    bborbe/tts-mcp#24 flagged that a constant and a model field were introduced
+    with no regression guard, which is exactly how a silent behaviour change
+    reaches users.
+    """
+
+    def test_state_returns_at_most_the_history_limit(self) -> None:
+        """More finished messages than the limit → exactly the limit is returned."""
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        for i in range(RECENT_HISTORY_LIMIT + 7):
+            mid = client.post("/say", json={"text": f"message {i}"}).json()["message_id"]
+            with state.status_lock:
+                ms = state.statuses[mid]
+                ms.status = "completed"
+                ms.completed_at = time.time() + i  # distinct, ascending
+
+        recent = client.get("/state").json()["recent"]
+        assert len(recent) == RECENT_HISTORY_LIMIT
+
+    def test_history_limit_is_larger_than_the_previous_ten(self) -> None:
+        """Regression lock on the raise from 10 — a silent revert would break this."""
+        assert RECENT_HISTORY_LIMIT >= 25
+
+    def test_state_exposes_the_resolved_voice_for_replay(self) -> None:
+        """say() → MessageStatus.voice → StatusResponse.voice, the full replay chain.
+
+        Replay re-POSTs the recorded voice so the message sounds like the original.
+        If any link drops it the replay still succeeds — in the default voice —
+        which is the kind of wrongness no other assertion would catch.
+        """
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        voice = "casual_female"  # _make_state's default_voice, a known-valid one
+
+        mid = client.post("/say", json={"text": "Replay me", "voice": voice}).json()["message_id"]
+        with state.status_lock:
+            assert state.statuses[mid].voice == voice
+            state.statuses[mid].status = "completed"
+            state.statuses[mid].completed_at = time.time()
+
+        recent = client.get("/state").json()["recent"]
+        entry = next(m for m in recent if m["message_id"] == mid)
+        assert entry["voice"] == voice
+
+    def test_state_voice_survives_the_default_voice_fallback(self) -> None:
+        """A /say with no voice still records the RESOLVED voice, not None.
+
+        Otherwise replaying such a message re-resolves the default at replay time,
+        which can differ from what was actually heard.
+        """
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        mid = client.post("/say", json={"text": "No voice given"}).json()["message_id"]
+        with state.status_lock:
+            assert state.statuses[mid].voice is not None
