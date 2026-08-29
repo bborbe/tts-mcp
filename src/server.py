@@ -53,13 +53,16 @@ logger = logging.getLogger("tts-server")
 STATUS_TTL_SECONDS: int = 24 * 60 * 60
 
 CANCELLABLE_STATUSES: frozenset[str] = frozenset({"queued", "loading", "playing", "paused"})
-
-# How many finished messages GET /state returns, newest first. The web UI renders
-# one Replay button per entry, so this is also how far back a message stays
-# re-speakable — raised from 10 on 2026-08-29 because 10 covers only a few minutes
-# of a chatty session.
-RECENT_HISTORY_LIMIT = 25
 """Statuses a message can still be cancelled from — everything not yet finished."""
+
+RECENT_HISTORY_LIMIT: int = 25
+"""How many finished messages GET /state returns, newest first.
+
+The web UI renders one Replay button per entry, so this is also how far back a
+message stays re-speakable. Raised from 10 on 2026-08-29 because 10 covers only a
+few minutes of a chatty session. Note STATUS_TTL_SECONDS is the harder ceiling:
+an evicted message has no entry regardless of this value.
+"""
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error", "cancelled"})
 """Statuses that are final: once reported, nothing may overwrite them."""
