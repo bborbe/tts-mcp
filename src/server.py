@@ -95,6 +95,11 @@ class MessageStatus:
     # Carried so a replay re-speaks in the voice the listener actually heard rather
     # than whatever the default happens to be at replay time.
     voice: str | None = None
+    # True when this message was queued by the web UI's Replay button. A replay is
+    # the same utterance heard again, not a new message, so it is excluded from
+    # GET /state's recent list — otherwise replays would evict the very messages
+    # the listener is replaying to catch up on. Playback itself is unaffected.
+    is_replay: bool = False
 
 
 class ServerState:
@@ -550,6 +555,10 @@ class SayRequest(BaseModel):
     instruct: str | None = None
     engine: str | None = None
     sender: str | None = None
+    # Set by the web UI's Replay button. The message is spoken normally but kept
+    # out of GET /state's recent list, since a replay is the same utterance heard
+    # again rather than a new one.
+    replay: bool = False
 
 
 class SayResponse(BaseModel):
@@ -753,6 +762,7 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             engine=engine,
             sender=body.sender,
             voice=voice,
+            is_replay=body.replay,
         )
 
     state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct, engine=engine))
@@ -851,7 +861,7 @@ def state_endpoint(request: Request) -> StateResponse:
                 current = ms
                 break
         recent_msgs = sorted(
-            (ms for ms in state.statuses.values() if ms.completed_at is not None),
+            (ms for ms in state.statuses.values() if ms.completed_at is not None and not ms.is_replay),
             key=lambda ms: ms.completed_at or 0.0,
             reverse=True,
         )[:RECENT_HISTORY_LIMIT]

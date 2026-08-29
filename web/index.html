@@ -116,6 +116,9 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    // Shown wherever a message carries no sender, so an unattributed utterance is
+    // visible as such rather than silently blank.
+    const UNKNOWN_SENDER = "unknown";
 
     async function post(path) {
       const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -135,6 +138,10 @@
         voice: m.voice || null,
         engine: m.engine || null,
         sender: m.sender ? "replay · " + m.sender : "replay",
+        // A replay is the same message heard again, not a new one. Marked so the
+        // server keeps it out of /state's recent list — otherwise replays evict the
+        // very messages being caught up on from the history window.
+        replay: true,
       };
       const res = await fetch("/say", {
         method: "POST",
@@ -151,7 +158,10 @@
       const cur = data.current;
       $("dot").className = "dot" + (cur ? " " + cur.status : "");
       $("status").textContent = cur ? cur.status : "idle";
-      $("sender").textContent = cur && cur.sender ? cur.sender : "";
+      // A missing sender is rendered explicitly, never as blank: an empty string is
+      // indistinguishable from "no sender field at all", which is how the attribution
+      // gap stayed invisible after the field shipped.
+      $("sender").textContent = cur ? (cur.sender || UNKNOWN_SENDER) : "";
       $("current-text").textContent = cur ? cur.text : "Nothing playing";
 
       const paused = cur && cur.status === "paused";
@@ -166,7 +176,7 @@
         return;
       }
       history.innerHTML = data.recent.map((m, i) => {
-        const sender = m.sender ? " · " + m.sender : "";
+        const sender = " · " + (m.sender || UNKNOWN_SENDER);
         const badge = '<span class="badge ' + m.status + '">' + m.status + "</span>";
         return (
           '<div class="history-item">' +

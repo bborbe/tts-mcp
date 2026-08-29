@@ -37,14 +37,6 @@ arrives too late, point them at `scripts/tts-skip` in the tts-mcp repo (`make sk
 hotkey (Raycast, macOS Shortcuts, skhd), which works no matter what any session is doing. `scripts/tts-pause` /
 `scripts/tts-resume` (`make pause` / `make resume`) are the same one-curl wrappers for pause/resume.
 
-## Sender field (who said this)
-
-Every `mcp__tts__say` call passes the session's tag as `sender` — the same 2–4 word tag that names the utterance
-(anchor task → parent goal → repo/service). The web UI (http://127.0.0.1:12000/) and `GET /state` then show which
-session said what, which matters once local and cloud sessions interleave. Sender is the tag, verbatim — never the
-session id or a full task title. When there is no anchor tag (untagged one-off speech), pass a short description of
-the work ("harness config", "inbox triage") just as the spoken tag does.
-
 ## Spoken confirmation on activation
 
 `on` / `narrate` / `interview` **also speak the confirmation** via `mcp__tts__say` (voice `ryan`) — the first thing the new mode does is use itself:
@@ -104,6 +96,7 @@ Caveats: in-flight messages are dropped across a restart; message IDs reset; one
 Speech is a different channel from the terminal text. When you call `mcp__tts__say`:
 
 - **Voice `ryan`, always** — unless `/tts-mcp:engine` selected a non-qwen3 engine, which overrides this. (`ryan` is a Qwen3-TTS CustomVoice speaker and exists *only* on qwen3; voxtral's voices are separate names such as `casual_male`. Voice names do not overlap across engines and the server rejects a mismatch with a 400, so voice and engine must be chosen together — see the `engine` skill. Check `get_voices` when a voice is rejected.)
+- **Pass `sender` on every call, no exceptions.** `mcp__tts__say` takes a `sender` argument — set it to the same short tag you speak (anchor task → parent goal → repo/service), verbatim. Never omit it, never send the session id or a full task title. One server serves every session, so an utterance with no `sender` is unattributable in the web UI (http://127.0.0.1:12000/) and in `GET /state` — which is exactly what the field exists to prevent. No anchor tag? Send the same short description of the work you speak (`"harness config"`, `"inbox triage"`). A call without `sender` is a bug, not a shortcut.
 - **English, always.** Speak English even when the user writes German (or any other language) — the input language never switches the spoken output. This matches the on-screen "English Only" rule; voice is not an exception to it. Do not switch voices to match an input language either. Proper nouns keep their native spelling; everything around them stays English.
 - **Lead with a throwaway word.** CoreAudio clips the first ~word of each utterance. Start every spoken message with a disposable lead token — `"Okay."`, `"So,"`, `"Right,"` — so the clip eats that, not the real first word. Never let a content word be first.
 - **Name the subject, every utterance.** One server serves every Claude session from a shared queue, so with several sessions open their speech interleaves with nothing to tell them apart — an unlabeled utterance is noise. Every spoken message carries a short tag naming what it is about:

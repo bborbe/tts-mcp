@@ -939,6 +939,64 @@ class TestResume:
         assert response.status_code == 404
 
 
+class TestReplayHistory:
+    """A replay is the same utterance again, so it must not enter the history list."""
+
+    def test_replay_message_is_excluded_from_recent(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "replay": True}).json()["message_id"]
+        with state.status_lock:
+            state.statuses[message_id].completed_at = time.time()
+
+        assert client.get("/state").json()["recent"] == []
+
+    def test_non_replay_message_still_appears_in_recent(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello"}).json()["message_id"]
+        with state.status_lock:
+            state.statuses[message_id].completed_at = time.time()
+
+        recent = client.get("/state").json()["recent"]
+        assert [m["message_id"] for m in recent] == [message_id]
+
+    def test_replay_does_not_evict_originals_from_the_window(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        original = client.post("/say", json={"text": "Original"}).json()["message_id"]
+        replay = client.post("/say", json={"text": "Original", "replay": True}).json()["message_id"]
+        now = time.time()
+        with state.status_lock:
+            state.statuses[original].completed_at = now - 1
+            state.statuses[replay].completed_at = now
+
+        recent = client.get("/state").json()["recent"]
+        assert [m["message_id"] for m in recent] == [original]
+
+    def test_replay_defaults_to_false(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello"}).json()["message_id"]
+
+        with state.status_lock:
+            assert state.statuses[message_id].is_replay is False
+
+    def test_replayed_message_is_still_reachable_by_status(self) -> None:
+        # Excluded from the history list, but it really was spoken — its own
+        # status endpoint must still report it.
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "replay": True}).json()["message_id"]
+
+        assert client.get(f"/status/{message_id}").status_code == 200
+
+
 class TestState:
     """Tests for GET /state."""
 
