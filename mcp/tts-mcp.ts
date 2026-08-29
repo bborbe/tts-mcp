@@ -178,15 +178,62 @@ server.tool(
           "engine loads its model, which can take ~15-20s; later requests are " +
           "immediate.",
       ),
+    sender: z
+      .string()
+      .optional()
+      .describe(
+        "Name of the session or sender that produced this message, e.g. the " +
+          "Claude session tag. Shown in the web UI and state endpoint so it is " +
+          "clear which session said what.",
+      ),
   },
-  async ({ voice, text, instruct, engine }) => {
+  async ({ voice, text, instruct, engine, sender }) => {
     log.info("say", {
       voice,
       engine: engine ?? "default",
       instruct: instruct ?? null,
+      sender: sender ?? null,
       text: text.slice(0, 80),
     });
-    return request("POST", "/say", { text, voice, instruct, engine });
+    return request("POST", "/say", { text, voice, instruct, engine, sender });
+  },
+);
+
+server.tool(
+  "pause",
+  "Pause the speech that is currently playing; it resumes from the same point " +
+    "when resume is called. Call with no arguments to pause whatever is playing " +
+    "right now, or pass message_id to pause one specific message.",
+  {
+    message_id: z
+      .string()
+      .optional()
+      .describe(
+        "Message ID to pause. Omit to pause whatever is playing right now.",
+      ),
+  },
+  async ({ message_id }) => {
+    log.info("pause", { message_id: message_id ?? null });
+    return request("POST", "/pause", { message_id });
+  },
+);
+
+server.tool(
+  "resume",
+  "Resume speech that was paused with pause, continuing from exactly where it " +
+    "stopped. Call with no arguments to resume whatever is paused right now, or " +
+    "pass message_id to resume one specific message.",
+  {
+    message_id: z
+      .string()
+      .optional()
+      .describe(
+        "Message ID to resume. Omit to resume whatever is paused right now.",
+      ),
+  },
+  async ({ message_id }) => {
+    log.info("resume", { message_id: message_id ?? null });
+    return request("POST", "/resume", { message_id });
   },
 );
 
@@ -229,7 +276,7 @@ server.tool(
 
 server.tool(
   "get_status",
-  "Check status of a speech synthesis request. Returns status (queued/loading/playing/completed/error), the engine used, original text, audio file path, and error details. 'loading' means the request is waiting on its engine's model to load.",
+  "Check status of a speech synthesis request. Returns status (queued/loading/playing/paused/completed/error), the engine used, original text, audio file path, sender, and error details. 'loading' means the request is waiting on its engine's model to load; 'paused' means playback was paused with the pause tool and will resume from the same point.",
   {
     message_id: z
       .string()

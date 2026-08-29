@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -571,6 +572,162 @@ class TestAudioPlayerCancel:
         # The cancelled job wrote nothing; the following one played in full.
         assert mock_stream.write.call_count == 1
         assert completed == [None]
+
+
+class TestAudioPlayerPause:
+    """Tests for pausing a job the player is already playing."""
+
+    @pytest.fixture(autouse=True)
+    def _stable_default_device(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: 1)
+
+    @patch("src.tts.player.sd")
+    def test_buffered_job_holds_while_paused_and_resumes(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        pause = threading.Event()
+
+        # The first write sets pause; the player must stop at the next slice
+        # boundary instead of continuing through the remaining chunks.
+        writes = {"count": 0}
+
+        def _pause_after_first_write(_frames: np.ndarray) -> None:
+            writes["count"] += 1
+            if writes["count"] == 1:
+                pause.set()
+
+        mock_stream.write.side_effect = _pause_after_first_write
+
+        completed: list[Path | None] = []
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 4,
+                output_path=None,
+                on_complete=completed.append,
+                pause=pause,
+            )
+        )
+
+        # Give the player a moment to hit the pause wait, then resume.
+        deadline = time.monotonic() + 2.0
+        while mock_stream.write.call_count < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        pause.clear()
+        player.close()
+
+        assert completed == [None]
+        # All four slices played, none lost to the pause.
+        assert mock_stream.write.call_count == 4
+
+    @patch("src.tts.player.sd")
+    def test_buffered_job_does_not_advance_while_paused(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        pause = threading.Event()
+
+        writes = {"count": 0}
+
+        def _pause_after_first_write(_frames: np.ndarray) -> None:
+            writes["count"] += 1
+            if writes["count"] == 1:
+                pause.set()
+
+        mock_stream.write.side_effect = _pause_after_first_write
+
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 4,
+                output_path=None,
+                pause=pause,
+            )
+        )
+
+        deadline = time.monotonic() + 2.0
+        while mock_stream.write.call_count < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        # While paused, no further slices are written even with time passing.
+        time.sleep(0.2)
+        assert mock_stream.write.call_count == 1
+
+        pause.clear()
+        player.close()
+
+    @patch("src.tts.player.sd")
+    def test_cancel_interrupts_a_paused_job(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        pause = threading.Event()
+        cancel = threading.Event()
+
+        # Pause before any write; then cancel lands while paused and must still
+        # stop the job (pause never blocks cancel).
+        pause.set()
+
+        cancelled: list[bool] = []
+        output_path = tmp_path / "cancelled-while-paused.wav"
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 4,
+                output_path=output_path,
+                on_complete=lambda _path: pytest.fail("cancelled job reported completion"),
+                on_cancel=lambda: cancelled.append(True),
+                cancel=cancel,
+                pause=pause,
+            )
+        )
+        time.sleep(0.2)
+        cancel.set()
+        player.close()
+
+        assert cancelled == [True]
+        assert not output_path.exists()
+        assert mock_stream.write.call_count == 0
+
+    @patch("src.tts.player.sd")
+    def test_streaming_job_holds_while_paused_and_resumes(self, mock_sd: MagicMock) -> None:
+        mock_stream = MagicMock()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0)
+        pause = threading.Event()
+
+        writes = {"count": 0}
+
+        def _pause_after_first_write(_frames: np.ndarray) -> None:
+            writes["count"] += 1
+            if writes["count"] == 1:
+                pause.set()
+
+        mock_stream.write.side_effect = _pause_after_first_write
+
+        source: queue.Queue[np.ndarray | None] = queue.Queue()
+        for _ in range(4):
+            source.put(np.ones(100, dtype=np.float32))
+        source.put(None)
+
+        completed: list[Path | None] = []
+        player.submit_stream(
+            StreamingPlaybackJob(
+                chunk_source=source,
+                output_path=None,
+                on_complete=completed.append,
+                pause=pause,
+            )
+        )
+
+        deadline = time.monotonic() + 2.0
+        while mock_stream.write.call_count < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        pause.clear()
+        player.close()
+
+        assert completed == [None]
+        assert mock_stream.write.call_count == 4
 
 
 class TestAudioPlayerStreaming:

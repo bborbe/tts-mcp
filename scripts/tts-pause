@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# Pause the speech that is playing right now; resume later with tts-resume.
+# Playback stops within ~100ms and continues from the same point on resume.
+#
+# Bind this to a global hotkey (Raycast, macOS Shortcuts, skhd) so playback can
+# be paused without waiting for an agent to be idle enough to call the MCP tool.
+#
+# Usage:
+#   tts-pause                 # pause the message that is playing
+#   tts-pause <message_id>    # pause one specific message
+#
+# Config resolution matches mcp/tts-mcp.ts and src/tts/config.py:
+#   1. $TTS_MCP_CONFIG
+#   2. $XDG_CONFIG_HOME/tts-mcp/config.yaml (default ~/.config/tts-mcp/config.yaml)
+#   3. <project root>/config.yaml
+
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+resolve_config() {
+	if [ -n "${TTS_MCP_CONFIG:-}" ]; then
+		echo "${TTS_MCP_CONFIG}"
+		return
+	fi
+	local xdg="${XDG_CONFIG_HOME:-${HOME}/.config}/tts-mcp/config.yaml"
+	if [ -f "${xdg}" ]; then
+		echo "${xdg}"
+		return
+	fi
+	echo "${PROJECT_ROOT}/config.yaml"
+}
+
+require_key() {
+	local key="$1" config="$2" value
+	value="$(sed -n "s/^${key}:[[:space:]]*\(.*\)$/\1/p" "${config}" | head -1 | tr -d '[:space:]')"
+	if [ -z "${value}" ]; then
+		echo "Missing required key '${key}' in ${config}" >&2
+		exit 1
+	fi
+	echo "${value}"
+}
+
+CONFIG="$(resolve_config)"
+if [ ! -f "${CONFIG}" ]; then
+	echo "Cannot read config file ${CONFIG}" >&2
+	exit 1
+fi
+
+HOST="$(require_key host "${CONFIG}")"
+PORT="$(require_key port "${CONFIG}")"
+
+# 0.0.0.0 is a listen address, not a connect address.
+if [ "${HOST}" = "0.0.0.0" ]; then
+	HOST="127.0.0.1"
+fi
+
+case "${1:-}" in
+"")
+	BODY='{}'
+	;;
+-h | --help)
+	sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	exit 0
+	;;
+-*)
+	echo "Unknown option: $1" >&2
+	exit 1
+	;;
+*)
+	BODY="{\"message_id\":\"$1\"}"
+	;;
+esac
+
+curl -fsS -X POST "http://${HOST}:${PORT}/pause" \
+	-H 'Content-Type: application/json' \
+	-d "${BODY}"
+echo

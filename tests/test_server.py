@@ -721,14 +721,14 @@ class TestCancel:
     def test_empty_body_cancels_what_is_playing(self) -> None:
         state = _make_state()
         _queue_status(state, "msg_playing", status="playing")
-        event = state.begin_playback("msg_playing")
+        cancel, _ = state.begin_playback("msg_playing")
         client = TestClient(_make_app(state))
 
         response = client.post("/cancel")
 
         assert response.status_code == 200
         assert response.json()["cancelled"] == ["msg_playing"]
-        assert event.is_set()
+        assert cancel.is_set()
 
     def test_nothing_playing_cancels_nothing(self) -> None:
         state = _make_state()
@@ -807,6 +807,252 @@ class TestCancel:
         response = client.post("/cancel", json={"message_id": "msg_a"})
 
         assert response.json()["queued"] == 1
+
+
+class TestPause:
+    """Tests for POST /pause."""
+
+    def test_empty_body_pauses_what_is_playing(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        _, pause = state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause")
+
+        assert response.status_code == 200
+        assert response.json()["paused"] == ["msg_playing"]
+        assert pause.is_set()
+        with state.status_lock:
+            assert state.statuses["msg_playing"].status == "paused"
+
+    def test_nothing_playing_pauses_nothing(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause")
+
+        assert response.status_code == 200
+        assert response.json()["paused"] == []
+
+    def test_named_message_is_paused(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        _, pause = state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause", json={"message_id": "msg_playing"})
+
+        assert response.json()["paused"] == ["msg_playing"]
+        assert pause.is_set()
+
+    def test_queued_message_cannot_be_paused(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_queued")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause", json={"message_id": "msg_queued"})
+
+        assert response.json()["paused"] == []
+        with state.status_lock:
+            assert state.statuses["msg_queued"].status == "queued"
+
+    def test_paused_message_is_still_cancellable(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        cancel, _ = state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        client.post("/pause")
+        response = client.post("/cancel", json={"message_id": "msg_playing"})
+
+        assert response.json()["cancelled"] == ["msg_playing"]
+        assert cancel.is_set()
+
+    def test_unknown_message_returns_404(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/pause", json={"message_id": "msg_nope"})
+
+        assert response.status_code == 404
+
+
+class TestResume:
+    """Tests for POST /resume."""
+
+    def test_empty_body_resumes_what_is_paused(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_paused", status="paused")
+        _, pause = state.begin_playback("msg_paused")
+        state.request_pause(None)
+        client = TestClient(_make_app(state))
+
+        response = client.post("/resume")
+
+        assert response.status_code == 200
+        assert response.json()["paused"] == ["msg_paused"]
+        assert not pause.is_set()
+        with state.status_lock:
+            assert state.statuses["msg_paused"].status == "playing"
+
+    def test_nothing_paused_resumes_nothing(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/resume")
+
+        assert response.status_code == 200
+        assert response.json()["paused"] == []
+
+    def test_named_message_is_resumed(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_paused", status="paused")
+        _, pause = state.begin_playback("msg_paused")
+        state.request_pause(None)
+        client = TestClient(_make_app(state))
+
+        response = client.post("/resume", json={"message_id": "msg_paused"})
+
+        assert response.json()["paused"] == ["msg_paused"]
+        assert not pause.is_set()
+
+    def test_playing_message_is_not_resumed(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        response = client.post("/resume", json={"message_id": "msg_playing"})
+
+        assert response.json()["paused"] == []
+        with state.status_lock:
+            assert state.statuses["msg_playing"].status == "playing"
+
+    def test_unknown_message_returns_404(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/resume", json={"message_id": "msg_nope"})
+
+        assert response.status_code == 404
+
+
+class TestState:
+    """Tests for GET /state."""
+
+    def test_idle_state_has_no_current(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        response = client.get("/state")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["current"] is None
+        assert data["recent"] == []
+        assert data["queued"] == 0
+
+    def test_playing_message_is_current(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_playing", status="playing")
+        state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        data = client.get("/state").json()
+
+        assert data["current"]["message_id"] == "msg_playing"
+        assert data["current"]["status"] == "playing"
+
+    def test_paused_message_is_current(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_paused", status="paused")
+        state.begin_playback("msg_paused")
+        state.request_pause(None)
+        client = TestClient(_make_app(state))
+
+        data = client.get("/state").json()
+
+        assert data["current"]["message_id"] == "msg_paused"
+        assert data["current"]["status"] == "paused"
+
+    def test_recent_returns_finished_messages_newest_first(self) -> None:
+        state = _make_state()
+        now = time.time()
+        for i, status in enumerate(["completed", "cancelled", "error"]):
+            _queue_status(state, f"msg_{i}", status=status)
+            with state.status_lock:
+                # Recent timestamps (within the 1h TTL) ordered oldest→newest.
+                state.statuses[f"msg_{i}"].completed_at = now - (2 - i)
+        client = TestClient(_make_app(state))
+
+        recent = client.get("/state").json()["recent"]
+
+        assert [m["message_id"] for m in recent] == ["msg_2", "msg_1", "msg_0"]
+        assert [m["status"] for m in recent] == ["error", "cancelled", "completed"]
+
+    def test_current_takes_precedence_over_recent(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_done", status="completed")
+        with state.status_lock:
+            state.statuses["msg_done"].completed_at = 0.0
+        _queue_status(state, "msg_playing", status="playing")
+        state.begin_playback("msg_playing")
+        client = TestClient(_make_app(state))
+
+        data = client.get("/state").json()
+
+        assert data["current"]["message_id"] == "msg_playing"
+        assert data["recent"] == []
+
+
+class TestSender:
+    """Tests for the sender field on POST /say and its visibility in status/state."""
+
+    def test_say_stores_sender(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "sender": "voice-anying"}).json()["message_id"]
+
+        with state.status_lock:
+            assert state.statuses[message_id].sender == "voice-anying"
+
+    def test_status_exposes_sender(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "sender": "voice-anying"}).json()["message_id"]
+        data = client.get(f"/status/{message_id}").json()
+
+        assert data["sender"] == "voice-anying"
+
+    def test_state_exposes_sender(self) -> None:
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_done"] = MessageStatus(
+                message_id="msg_done",
+                status="completed",
+                text="Hello",
+                audio_file=None,
+                error=None,
+                completed_at=time.time(),
+                sender="voice-anying",
+            )
+        client = TestClient(_make_app(state))
+
+        data = client.get("/state").json()
+
+        assert data["recent"][0]["sender"] == "voice-anying"
+
+    def test_say_without_sender_stores_none(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello"}).json()["message_id"]
+
+        with state.status_lock:
+            assert state.statuses[message_id].sender is None
 
 
 class TestFailItem:

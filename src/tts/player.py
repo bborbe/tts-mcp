@@ -106,6 +106,10 @@ class PlaybackJob:
         cancel: Set by the submitter to stop this job part-way. Owned per job,
             so cancelling the utterance that is playing now can never leak into
             the one that starts next.
+        pause: Set by the submitter to hold this job mid-utterance. Playback
+            stops at the next slice boundary and resumes from that point when
+            the event is cleared. A paused job still honours ``cancel`` — pause
+            never blocks cancellation. Owned per job, like cancel.
     """
 
     chunks: list[np.ndarray]
@@ -114,6 +118,7 @@ class PlaybackJob:
     on_error: Callable[[Exception], None] | None = None
     on_cancel: Callable[[], None] | None = None
     cancel: threading.Event | None = None
+    pause: threading.Event | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -130,6 +135,12 @@ class StreamingPlaybackJob:
     fires, and a cancelled job saves no WAV. The player stops consuming
     ``chunk_source`` immediately; the producer notices the same event and stops
     generating (see play_stream), so no one waits for the abandoned queue.
+
+    Pause works as it does for PlaybackJob: while ``pause`` is set the player
+    holds between write slices and resumes from the same point when it clears.
+    The producer keeps generating into the unbounded queue while paused (see
+    play_stream); for the pauses this feature serves — a meeting, a question —
+    the queue growth is negligible, and a cancel still interrupts a pause.
     """
 
     chunk_source: "queue.Queue[np.ndarray | None]"
@@ -138,6 +149,7 @@ class StreamingPlaybackJob:
     on_error: Callable[[Exception], None] | None = None
     on_cancel: Callable[[], None] | None = None
     cancel: threading.Event | None = None
+    pause: threading.Event | None = None
 
 
 class AudioPlayer:
@@ -230,18 +242,31 @@ class AudioPlayer:
             return stream
         return self._open_stream()
 
-    def _write_chunk(self, stream: AudioOutputStream, chunk: np.ndarray, cancel: threading.Event | None) -> bool:
-        """Write one chunk to the output stream, in cancellable slices.
+    def _write_chunk(
+        self,
+        stream: AudioOutputStream,
+        chunk: np.ndarray,
+        cancel: threading.Event | None,
+        pause: threading.Event | None,
+    ) -> bool:
+        """Write one chunk to the output stream, in cancellable and pausable slices.
 
         ``stream.write`` blocks until the device has taken the audio, so writing
         a whole chunk at once would make cancellation wait out the chunk (a
         second, at the default streaming_interval). Slicing bounds that wait to
         WRITE_SLICE_SECONDS.
 
+        Pause is checked between slices, so it has the same latency as cancel.
+        While ``pause`` is set the player waits instead of writing, and resumes
+        from the exact slice boundary when it clears — no position bookkeeping
+        needed. ``cancel`` is re-checked inside the pause wait, so pausing never
+        delays a cancel.
+
         Args:
             stream: Warm output stream to write to.
             chunk: Audio samples for this chunk.
             cancel: Cancellation event for the current job, or None.
+            pause: Pause event for the current job, or None.
 
         Returns:
             True if the whole chunk was written, False if cancelled part-way.
@@ -250,6 +275,10 @@ class AudioPlayer:
         for start in range(0, len(frames), self._slice_frames):
             if cancel is not None and cancel.is_set():
                 return False
+            while pause is not None and pause.is_set():
+                if cancel is not None and cancel.is_set():
+                    return False
+                pause.wait(WRITE_SLICE_SECONDS)
             stream.write(frames[start : start + self._slice_frames])
         return True
 
@@ -282,7 +311,7 @@ class AudioPlayer:
         try:
             stream = self._ensure_stream(stream)
             for chunk in job.chunks:
-                if not self._write_chunk(stream, chunk, job.cancel):
+                if not self._write_chunk(stream, chunk, job.cancel, job.pause):
                     self._finish_cancelled(job)
                     return stream
             if job.output_path is not None:
@@ -314,7 +343,7 @@ class AudioPlayer:
                 chunk = job.chunk_source.get()
                 if chunk is None:
                     break
-                if not self._write_chunk(stream, chunk, job.cancel):
+                if not self._write_chunk(stream, chunk, job.cancel, job.pause):
                     self._finish_cancelled(job)
                     return stream
                 if job.output_path is not None:
@@ -406,6 +435,7 @@ def play_stream(
     on_error: Callable[[Exception], None] | None,
     on_cancel: Callable[[], None] | None = None,
     cancel: threading.Event | None = None,
+    pause: threading.Event | None = None,
 ) -> None:
     """Feed streamed generation chunks to the player as they are produced.
 
@@ -420,6 +450,12 @@ def play_stream(
     player has already stopped playing by then, so continuing to drive the model
     would burn GPU time producing audio nobody will hear.
 
+    ``pause`` is forwarded to the player job and honoured between write slices
+    on the player thread. Generation itself keeps running while paused (chunks
+    accumulate in the unbounded source queue) — for the short pauses this serves
+    the queue growth is negligible, and it keeps the model warm for an instant
+    resume.
+
     Args:
         player: Persistent audio player.
         chunk_iter: Iterator yielding audio chunks as they are generated.
@@ -428,6 +464,7 @@ def play_stream(
         on_error: Called if playback fails.
         on_cancel: Called instead of on_complete when the job is cancelled.
         cancel: Event that stops both playback and generation when set.
+        pause: Event that holds playback mid-utterance when set.
     """
     source: queue.Queue[np.ndarray | None] = queue.Queue()
     player.submit_stream(
@@ -438,6 +475,7 @@ def play_stream(
             on_error=on_error,
             on_cancel=on_cancel,
             cancel=cancel,
+            pause=pause,
         )
     )
     try:
