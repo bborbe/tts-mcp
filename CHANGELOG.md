@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.10.0
 
 - feat: Add a **Replay** button to each recent-message entry — re-queues that message with its recorded `text`, `voice`, and `engine`, so it sounds like the original rather than falling back to whatever the defaults are at replay time. `MessageStatus` and `StatusResponse` now carry the resolved `voice` (only `engine` and `sender` were tracked before), which is what makes a faithful replay possible. The replay is attributed as `replay · <sender>` so history stays honest about which entries were replays.
 - feat: Show the last **25** finished messages instead of 10, via a named `RECENT_HISTORY_LIMIT`. Paired with the TTL change below, so the 25 are actually reachable.
