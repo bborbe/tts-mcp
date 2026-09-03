@@ -65,20 +65,12 @@ Silence has two causes that look identical from the user's side, and **only one 
 
 | What you observe | Cause | Fix |
 |---|---|---|
-| `mcp__tts__say` errors with `No such tool available` | The session's **MCP tool binding** dropped. The server is almost certainly fine. | Restart Claude Code, or start a new session. For the rest of the current session, reach the server over HTTP (below). |
+| `mcp__tts__say` errors with `No such tool available` | The session's **MCP tool binding** dropped. The server is almost certainly fine. | Restart Claude Code, or start a new session. **No HTTP fallback** — a missing binding is final for the session. |
 | `mcp__tts__say` **succeeds** (returns a `message_id`) but nothing is audible | The server bound a **stale audio device**. | The restart steps below. |
 
 A dropped binding does not heal on `launchctl kickstart` — the server respawns healthy, `/health` returns `ok`, and the tool is still missing, because the tool list is owned by the MCP client in the Claude Code session, not by the server process. Restarting into a green health check and declaring victory is the trap here: the check passes and the user still hears nothing.
 
-**HTTP fallback for the current session** — the server exposes the same endpoint the MCP tool wraps, so speech still works without the binding:
-
-```bash
-curl -s -X POST http://127.0.0.1:12000/say \
-  -H 'Content-Type: application/json' \
-  -d '{"text":"Okay. Tag here. Message.","voice":"ryan"}'
-```
-
-Returns the same `{"message_id": ..., "status": "queued"}` shape. Every rule in the speaking playbook below still applies — throwaway lead word, session tag, English, terse. Observed 2026-08-22: the binding dropped mid-session, `kickstart` + `/health` both came back clean, and this fallback was what actually restored audio.
+**No HTTP fallback — MCP or nothing.** The server exposes the same endpoint over HTTP, but this skill deliberately never reaches it as a fallback. A missing `mcp__tts__say` is the session's MCP config in force — and in a Discord-answered session the tts server is removed from the tool set on purpose (`--strict-mcp-config`), so a "dropped binding" there is the guard working, not a fault. Calling the HTTP endpoint routes around exactly that guard: the reply is already spoken into the call by the assistant itself, so the fallback only adds a duplicate voice on the laptop speakers. Observed 2026-09-03 in a live Discord call — the HTTP fallback double-spoke every answer. A dropped binding is final for the session: restart Claude Code, or start a new session.
 
 ### Restart steps (stale-device case)
 
