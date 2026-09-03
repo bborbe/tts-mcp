@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- fix(skill): `/tts-mcp:voice` no longer prescribes an HTTP fallback when the `mcp__tts__say` binding is missing — **MCP or nothing**. A missing tool is the session's MCP config in force, and in a Discord-answered session the tts server is removed from the tool set on purpose (`--strict-mcp-config`) — so a "dropped binding" there is the guard working, not a fault. Calling the HTTP endpoint routed around exactly that guard: the reply was already spoken into the call by the assistant itself, so the fallback only added a duplicate voice on the laptop speakers (observed live 2026-09-03).
+
 ## v0.11.0
 
 - feat(server): `GET /state` now returns a `pending` list — messages accepted by `POST /say` that are queued/loading but not yet finished, oldest first, capped at 25 (same `RECENT_HISTORY_LIMIT` as `recent`). A message is now visible in the web UI from the moment it is accepted, instead of being invisible until playback starts (`recent` only held completed messages and `queued` was just a count). Replays are excluded for consistency with `recent`.
