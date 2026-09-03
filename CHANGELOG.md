@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.11.1
 
 - fix(skill): `/tts-mcp:voice` no longer prescribes an HTTP fallback when the `mcp__tts__say` binding is missing — **MCP or nothing**. A missing tool is the session's MCP config in force, and in a Discord-answered session the tts server is removed from the tool set on purpose (`--strict-mcp-config`) — so a "dropped binding" there is the guard working, not a fault. Calling the HTTP endpoint routed around exactly that guard: the reply was already spoken into the call by the assistant itself, so the fallback only added a duplicate voice on the laptop speakers (observed live 2026-09-03).
 
