@@ -1,5 +1,6 @@
 """Tests for the FastAPI TTS server."""
 
+import json
 import re
 import threading
 import time
@@ -12,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import src.server as server_module
 from src.server import (
     RECENT_HISTORY_LIMIT,
     STATUS_TTL_SECONDS,
@@ -180,6 +182,16 @@ def _use_immediate_audio_player(monkeypatch: pytest.MonkeyPatch) -> None:
     _ImmediateAudioPlayer.active_count = 0
     _ImmediateAudioPlayer.max_active_count = 0
     monkeypatch.setattr("src.server.AudioPlayer", _ImmediateAudioPlayer)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_history_path(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point HISTORY_PATH at a per-test temp file.
+
+    Every status transition now persists the history, so without this the
+    eviction/cancel tests would write data/history.json into the repo tree.
+    """
+    monkeypatch.setattr("src.server.HISTORY_PATH", tmp_path / "history.json")
 
 
 class TestHealth:
@@ -1985,3 +1997,150 @@ class TestReplaySupport:
         mid = client.post("/say", json={"text": "No voice given"}).json()["message_id"]
         with state.status_lock:
             assert state.statuses[mid].voice is not None
+
+
+class TestPersistence:
+    """Message history persisted to HISTORY_PATH across restarts."""
+
+    def test_say_writes_history_file(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        client.post("/say", json={"text": "Hello"})
+
+        assert server_module.HISTORY_PATH.exists()
+
+    def test_completion_is_persisted(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        mid = client.post("/say", json={"text": "Hello"}).json()["message_id"]
+        with state.status_lock:
+            ms = state.statuses[mid]
+            ms.status = "completed"
+            ms.completed_at = time.time()
+        state.persist()
+
+        payload = json.loads(server_module.HISTORY_PATH.read_text(encoding="utf-8"))
+        entry = next(e for e in payload if e["message_id"] == mid)
+        assert entry["status"] == "completed"
+        assert entry["text"] == "Hello"
+        assert entry["completed_at"] is not None
+
+    def test_cancel_is_persisted(self) -> None:
+        state = _make_state()
+        _queue_status(state, "msg_queued")
+        client = TestClient(_make_app(state))
+
+        client.post("/cancel", json={"all": True})
+
+        payload = json.loads(server_module.HISTORY_PATH.read_text(encoding="utf-8"))
+        assert any(e["message_id"] == "msg_queued" and e["status"] == "cancelled" for e in payload)
+
+    def test_load_persisted_restores_terminal_entries(self) -> None:
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_done"] = MessageStatus(
+                message_id="msg_done",
+                status="completed",
+                text="Done",
+                audio_file="out.wav",
+                error=None,
+                completed_at=time.time(),
+                engine=VOXTRAL,
+                sender="test",
+                voice="casual_female",
+            )
+        state.persist()
+
+        fresh = _make_state()
+        restored = fresh.load_persisted()
+
+        assert restored == 1
+        with fresh.status_lock:
+            ms = fresh.statuses["msg_done"]
+            assert ms.status == "completed"
+            assert ms.text == "Done"
+            assert ms.sender == "test"
+            assert ms.voice == "casual_female"
+
+    def test_load_persisted_demotes_midflight_to_cancelled(self) -> None:
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_queued"] = MessageStatus(
+                message_id="msg_queued",
+                status="queued",
+                text="Never played",
+                audio_file=None,
+                error=None,
+                completed_at=None,
+            )
+            state.statuses["msg_playing"] = MessageStatus(
+                message_id="msg_playing",
+                status="playing",
+                text="Interrupted",
+                audio_file=None,
+                error=None,
+                completed_at=None,
+            )
+        state.persist()
+
+        fresh = _make_state()
+        fresh.load_persisted()
+
+        with fresh.status_lock:
+            assert fresh.statuses["msg_queued"].status == "cancelled"
+            assert fresh.statuses["msg_queued"].completed_at is not None
+            assert fresh.statuses["msg_playing"].status == "cancelled"
+
+    def test_load_persisted_ignores_missing_file(self) -> None:
+        state = _make_state()
+        assert state.load_persisted() == 0
+        with state.status_lock:
+            assert state.statuses == {}
+
+    def test_load_persisted_ignores_corrupt_file(self) -> None:
+        server_module.HISTORY_PATH.write_text("{ not json", encoding="utf-8")
+        state = _make_state()
+        assert state.load_persisted() == 0
+
+    def test_eviction_prunes_persisted_history(self) -> None:
+        state = _make_state()
+        expired_time = time.time() - STATUS_TTL_SECONDS - 1
+        with state.status_lock:
+            state.statuses["msg_old"] = MessageStatus(
+                message_id="msg_old",
+                status="completed",
+                text="Old",
+                audio_file=None,
+                error=None,
+                completed_at=expired_time,
+            )
+        state.persist()
+
+        state.evict_expired()
+
+        payload = json.loads(server_module.HISTORY_PATH.read_text(encoding="utf-8"))
+        assert all(e["message_id"] != "msg_old" for e in payload)
+
+    def test_restart_round_trip_via_say(self) -> None:
+        """A completed message survives a full server restart (new state + load)."""
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        mid = client.post("/say", json={"text": "Persist me", "sender": "session-a"}).json()["message_id"]
+        with state.status_lock:
+            ms = state.statuses[mid]
+            ms.status = "completed"
+            ms.completed_at = time.time()
+        state.persist()
+
+        fresh_state = _make_state()
+        fresh_state.load_persisted()
+        app = _make_app(fresh_state)
+        fresh_client = TestClient(app)
+
+        recent = fresh_client.get("/state").json()["recent"]
+
+        entry = next(m for m in recent if m["message_id"] == mid)
+        assert entry["text"] == "Persist me"
+        assert entry["sender"] == "session-a"
+        assert entry["status"] == "completed"

@@ -72,6 +72,9 @@ reports/
 data/input/
 data/output/
 data/models/
+# Runtime message-status history written by the server on every transition.
+data/history.json
+data/history.tmp
 
 # Claude Code
 .claude/

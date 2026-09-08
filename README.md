@@ -301,7 +301,7 @@ FastAPI auto-generates interactive docs at `/docs` (Swagger) and `/redoc` (ReDoc
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/` | Web UI: message history + sender + pause/resume controls |
+| GET | `/` | Web UI: message history + sender + pause/resume/skip(-all) controls |
 | GET | `/health` | Liveness check |
 | GET | `/voices` | List available voices and default voice, plus per-engine grouping and load state |
 | POST | `/say` | Queue text for synthesis and playback (returns message ID) |
@@ -396,12 +396,23 @@ queue depth — the data behind the web UI and the menu bar:
 }
 ```
 
-`current` is null when idle. `recent` holds up to 10 finished messages and expires with the 1-hour status TTL.
+`current` is null when idle. `recent` holds up to 25 finished messages (most recent first) and expires with the
+24-hour status TTL.
 
 ### Web UI
 
 Serving `GET /` on the server is a small self-contained page that polls `/state` every 2s and shows the current
-status, the message history with senders, and Pause/Resume/Skip buttons. Open it at `http://127.0.0.1:12000/`.
+status, the message history with senders, and the transport controls — Pause/Resume, Skip (stop what is playing),
+and **Skip all** (stop what is playing and drop everything queued behind it). The controls sit at the top of the
+status card so they stay reachable under a long message. Open it at `http://127.0.0.1:12000/`.
+
+### Message History Persistence
+
+The message-status history is written to `data/history.json` on every status transition (atomic temp-file write)
+and restored at startup, so a server restart — launchd KeepAlive, device-switch auto-restart, crash — loses nothing
+the server already knew. Anything that was mid-flight (queued/loading/playing/paused) when the server stopped is
+demoted to `cancelled` on load, because its work item lived only in the in-memory queue and can never play now. The
+persisted history is bounded by the same `STATUS_TTL_SECONDS` eviction as the in-memory one.
 
 ### Message Lifecycle
 

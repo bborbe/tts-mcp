@@ -68,6 +68,10 @@
       cursor: not-allowed;
     }
     button.secondary { background: var(--border); }
+    /* The control row sits at the top of the card now; the generic button rule's
+       top margin would push it off the card's padding. Zero it for row buttons. */
+    .controls { display: flex; gap: 8px; margin-bottom: 12px; }
+    .controls button { margin-top: 0; }
     button.replay {
       margin-top: 0;
       margin-left: auto;
@@ -99,16 +103,17 @@
   <div class="subtitle">Local TTS server · <span id="conn">connecting…</span></div>
 
   <div class="card">
+    <div class="controls">
+      <button id="toggle" disabled>Pause</button>
+      <button id="skip" class="secondary" disabled>Skip</button>
+      <button id="skip-all" class="secondary" disabled>Skip all</button>
+    </div>
     <div class="status-row">
       <span class="dot" id="dot"></span>
       <span class="status-label" id="status">—</span>
       <span class="sender" id="sender"></span>
     </div>
     <div class="text" id="current-text">Nothing playing</div>
-    <div style="display:flex; gap:8px;">
-      <button id="toggle" disabled>Pause</button>
-      <button id="skip" class="secondary" disabled>Skip</button>
-    </div>
   </div>
 
   <div class="card">
@@ -122,8 +127,8 @@
     // visible as such rather than silently blank.
     const UNKNOWN_SENDER = "unknown";
 
-    async function post(path) {
-      const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    async function post(path, body) {
+      const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
       if (!res.ok) {
         $("conn").textContent = "HTTP " + res.status;
       }
@@ -202,15 +207,21 @@
       $("sender").textContent = cur ? (cur.sender || UNKNOWN_SENDER) : "";
       $("current-text").textContent = cur ? cur.text : "Nothing playing";
 
-      // Pause always works — even with nothing playing it arms the queue-wide
-      // hold, and Resume clears it. Skip only makes sense mid-playback.
-      $("toggle").disabled = false;
-      $("toggle").textContent = (paused || held) ? "Resume" : "Pause";
-      $("skip").disabled = !playing && !paused;
-
       const history = $("history");
       const pending = data.pending || [];
       const recent = data.recent || [];
+
+      // Pause always works — even with nothing playing it arms the queue-wide
+      // hold, and Resume clears it. Skip only makes sense mid-playback;
+      // Skip all also makes sense when messages are still waiting in the queue.
+      // Reads `pending`, so it MUST stay below that declaration: a `const` sits in
+      // the temporal dead zone until initialized, so touching it earlier throws
+      // ReferenceError inside render() — which poll() catches and reports as
+      // "offline", blanking the whole page. Observed live on the preview server.
+      $("toggle").disabled = false;
+      $("toggle").textContent = (paused || held) ? "Resume" : "Pause";
+      $("skip").disabled = !playing && !paused;
+      $("skip-all").disabled = !playing && !paused && pending.length === 0;
       if (pending.length === 0 && recent.length === 0 && !cur) {
         history.innerHTML = '<div class="empty">No messages yet.</div>';
         return;
@@ -255,6 +266,7 @@
       post($("toggle").textContent === "Resume" ? "/resume" : "/pause");
     });
     $("skip").addEventListener("click", () => post("/cancel"));
+    $("skip-all").addEventListener("click", () => post("/cancel", { all: true }));
 
     poll();
     setInterval(poll, 2000);

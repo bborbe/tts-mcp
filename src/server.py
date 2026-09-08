@@ -65,6 +65,18 @@ few minutes of a chatty session. Note STATUS_TTL_SECONDS is the harder ceiling:
 an evicted message has no entry regardless of this value.
 """
 
+HISTORY_PATH: Path = Path("data/history.json")
+"""Where the message-status history is persisted between server runs.
+
+A sibling of OUTPUT_DIR (``data/output``) under the same relative ``data/``
+directory. Every status transition writes the full ``statuses`` dict here
+(atomically via a temp file), so a restart — launchd KeepAlive, device-switch
+auto-restart, crash — loses nothing the server already knew. On startup
+ServerState.load_persisted restores it; anything that was mid-flight
+(queued/loading/playing/paused) is demoted to cancelled, because its work item
+lived only in the in-memory queue and can never play now.
+"""
+
 TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "error", "cancelled"})
 """Statuses that are final: once reported, nothing may overwrite them."""
 
@@ -182,6 +194,12 @@ class ServerState:
         self._status_lock = threading.Lock()
         self._counter = 0
         self._counter_lock = threading.Lock()
+        # Serializes persist() writes. The snapshot happens under status_lock,
+        # but the temp-file write + replace must be exclusive: two concurrent
+        # writers sharing the same .tmp path race (one replace() moves the file
+        # out from under the other). Guarded by this lock, not status_lock,
+        # because disk I/O must never block status transitions.
+        self._persist_lock = threading.Lock()
 
     @property
     def registry(self) -> EngineRegistry:
@@ -377,6 +395,73 @@ class ServerState:
                 del self.statuses[mid]
                 self._cancelled.discard(mid)
                 self._paused.discard(mid)
+        if expired:
+            self.persist()
+
+    def persist(self) -> None:
+        """Write the current message-status history to HISTORY_PATH.
+
+        Called after every status transition so a restart loses nothing the
+        server already knew. The write is atomic (temp file + replace) so a
+        crash mid-write cannot leave a truncated file that fails to load.
+        """
+        with self._status_lock:
+            payload = [dataclasses.asdict(ms) for ms in self.statuses.values()]
+        with self._persist_lock:
+            tmp = HISTORY_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp.replace(HISTORY_PATH)
+
+    def load_persisted(self) -> int:
+        """Restore message-status history from HISTORY_PATH at startup.
+
+        Anything that was mid-flight when the server stopped (queued/loading/
+        playing/paused) is demoted to cancelled: its work item lived only in
+        the in-memory queue and can never play now. A missing or unreadable
+        file is not an error — it simply means no prior history exists.
+
+        Returns:
+            Number of status entries restored.
+        """
+        if not HISTORY_PATH.exists():
+            return 0
+        with self._status_lock:
+            try:
+                decoded: object = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                logger.warning("Ignoring unreadable history file %s: %s", HISTORY_PATH, exc)
+                return 0
+            if not isinstance(decoded, list):
+                logger.warning("Ignoring malformed history file %s: expected a JSON list", HISTORY_PATH)
+                return 0
+            now = time.time()
+            restored = 0
+            # Field-by-field like StatusResponse's to_response. A persisted entry
+            # carries the MessageStatus shape, so a missing key raises KeyError
+            # and a wrong type raises TypeError — both treated as corrupt.
+            for entry in cast(list[dict[str, object]], decoded):
+                try:
+                    ms = MessageStatus(
+                        message_id=cast(str, entry["message_id"]),
+                        status=cast(str, entry["status"]),
+                        text=cast(str, entry["text"]),
+                        audio_file=cast(str | None, entry.get("audio_file")),
+                        error=cast(str | None, entry.get("error")),
+                        completed_at=cast(float | None, entry.get("completed_at")),
+                        engine=cast(str | None, entry.get("engine")),
+                        sender=cast(str | None, entry.get("sender")),
+                        voice=cast(str | None, entry.get("voice")),
+                        is_replay=cast(bool, entry.get("is_replay", False)),
+                    )
+                except (KeyError, TypeError):
+                    logger.warning("Ignoring malformed history entry in %s: %r", HISTORY_PATH, entry)
+                    continue
+                if ms.status not in TERMINAL_STATUSES:
+                    ms.status = "cancelled"
+                    ms.completed_at = ms.completed_at if ms.completed_at is not None else now
+                self.statuses[ms.message_id] = ms
+                restored += 1
+            return restored
 
     def begin_playback(self, message_id: str) -> tuple[threading.Event, threading.Event]:
         """Register the message the worker is about to play and hand back its cancel + pause events.
@@ -496,6 +581,8 @@ class ServerState:
         # the threads they wake take the same lock to report their final status.
         for event in playing:
             event.set()
+        if targets:
+            self.persist()
         return targets
 
     def request_pause(self, message_id: str | None) -> list[str]:
@@ -586,6 +673,7 @@ class ServerState:
                 status.status = "cancelled"
                 status.completed_at = time.time()
             self._cancelled.discard(message_id)
+        self.persist()
 
 
 class SayRequest(BaseModel):
@@ -813,6 +901,8 @@ def say(request: Request, body: SayRequest) -> SayResponse:
 
     state.work_queue.put(WorkItem(message_id=message_id, text=cleaned, voice=voice, instruct=body.instruct, engine=engine))
 
+    state.persist()
+
     logger.debug(
         "POST /say request:\n%s",
         json.dumps(
@@ -983,6 +1073,7 @@ def _fail_item(state: ServerState, message_id: str, error: str) -> None:
             ms.status = "error"
             ms.error = error
             ms.completed_at = time.time()
+    state.persist()
 
 
 def _start_playback(
@@ -1162,6 +1253,7 @@ def _playback_status_callbacks(
             ms.audio_file = str(output_path) if output_path is not None else None
             ms.completed_at = time.time()
         state.end_playback(item.message_id)
+        state.persist()
         logger.debug("Playback completed for %s -> %s", item.message_id, output_path)
         done.set()
 
@@ -1173,6 +1265,7 @@ def _playback_status_callbacks(
             ms.error = str(exc)
             ms.completed_at = time.time()
         state.end_playback(item.message_id)
+        state.persist()
         done.set()
 
     def on_cancel() -> None:
@@ -1181,6 +1274,7 @@ def _playback_status_callbacks(
             ms.status = "cancelled"
             ms.completed_at = time.time()
         state.end_playback(item.message_id)
+        state.persist()
         logger.debug("Playback cancelled for %s", item.message_id)
         done.set()
 
@@ -1698,6 +1792,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     cleanly instead of after startup completes.
     """
     state = _build_server_state(_parse_server_config())
+    restored = state.load_persisted()
+    if restored:
+        logger.info("Restored %d message(s) from %s", restored, HISTORY_PATH)
 
     worker = threading.Thread(target=server_audio_worker, args=(state,), daemon=True)
     worker.start()
