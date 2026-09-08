@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat(server): message history now **survives a server restart** — every status transition persists the full `statuses` dict to `data/history.json` (atomic temp-file write), and startup restores it via `ServerState.load_persisted`. Anything that was mid-flight (queued/loading/playing/paused) when the server stopped is demoted to `cancelled` on load: its work item lived only in the in-memory queue and can never play. Eviction still applies, so the persisted history is bounded by the same `STATUS_TTL_SECONDS` as the in-memory one. Was previously "Out of Scope" in the pause/resume/UI task — now closed.
+- feat(web): the **Pause/Skip/Skip all controls now sit at the top of the status card**, above the current-message text, so they stay reachable without scrolling past a long message.
+- feat(web): new **Skip all** button — `POST /cancel` with `all: true` stops the playing message and drops everything still queued behind it, in one click.
+
 ## v0.11.1
 
 - fix(skill): `/tts-mcp:voice` no longer prescribes an HTTP fallback when the `mcp__tts__say` binding is missing — **MCP or nothing**. A missing tool is the session's MCP config in force, and in a Discord-answered session the tts server is removed from the tool set on purpose (`--strict-mcp-config`) — so a "dropped binding" there is the guard working, not a fault. Calling the HTTP endpoint routed around exactly that guard: the reply was already spoken into the call by the assistant itself, so the fallback only added a duplicate voice on the laptop speakers (observed live 2026-09-03).
