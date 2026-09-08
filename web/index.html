@@ -207,17 +207,21 @@
       $("sender").textContent = cur ? (cur.sender || UNKNOWN_SENDER) : "";
       $("current-text").textContent = cur ? cur.text : "Nothing playing";
 
+      const history = $("history");
+      const pending = data.pending || [];
+      const recent = data.recent || [];
+
       // Pause always works — even with nothing playing it arms the queue-wide
       // hold, and Resume clears it. Skip only makes sense mid-playback;
       // Skip all also makes sense when messages are still waiting in the queue.
+      // Reads `pending`, so it MUST stay below that declaration: a `const` sits in
+      // the temporal dead zone until initialized, so touching it earlier throws
+      // ReferenceError inside render() — which poll() catches and reports as
+      // "offline", blanking the whole page. Observed live on the preview server.
       $("toggle").disabled = false;
       $("toggle").textContent = (paused || held) ? "Resume" : "Pause";
       $("skip").disabled = !playing && !paused;
       $("skip-all").disabled = !playing && !paused && pending.length === 0;
-
-      const history = $("history");
-      const pending = data.pending || [];
-      const recent = data.recent || [];
       if (pending.length === 0 && recent.length === 0 && !cur) {
         history.innerHTML = '<div class="empty">No messages yet.</div>';
         return;
