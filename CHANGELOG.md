@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.12.0
 
 - feat(server): message history now **survives a server restart** — every status transition persists the full `statuses` dict to `data/history.json` (atomic temp-file write), and startup restores it via `ServerState.load_persisted`. Anything that was mid-flight (queued/loading/playing/paused) when the server stopped is demoted to `cancelled` on load: its work item lived only in the in-memory queue and can never play. Eviction still applies, so the persisted history is bounded by the same `STATUS_TTL_SECONDS` as the in-memory one. Was previously "Out of Scope" in the pause/resume/UI task — now closed.
 - feat(web): the **Pause/Skip/Skip all controls now sit at the top of the status card**, above the current-message text, so they stay reachable without scrolling past a long message.
