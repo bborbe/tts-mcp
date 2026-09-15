@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: **the voice command surface is now one command per thing.** `/tts-mcp:voice` is gone; in its place: `/tts-mcp:on` (attention signals plus a spoken gist of every substantive answer), `/tts-mcp:interview` (every question needing input, read aloud one at a time), `/tts-mcp:off`, `/tts-mcp:status`, `/tts-mcp:restart`. The old surface overloaded one word — `on` meant attention-signals-only as a mode arg, but narrate as a command, so re-running `/tts-mcp:voice on` after `/tts-mcp:on` silently downgraded you. There is no mode dial left to get wrong, and nothing overlaps.
+- feat: the **speaking playbook moved to `docs/voice-playbook.md`** — the canonical rule source the commands read at runtime, instead of a skill body that was also carrying the mode dial. `skills/voice/` is deleted; all five commands point at the doc.
+- fix: `/tts-mcp:restart` now carries the **wedged-relay** case — which a restart cannot fix and can in fact cause. `mcp__tts__say` erroring `health_check_unreachable` **while `curl <url>/health` from a shell returns `{"status":"ok"}`** means the session's MCP relay is stale against a restarted server; reach for `/mcp`, not another restart. Observed 2026-09-06, where that contradiction cost a server restart, a health-poll loop, an HTTP-fallback detour and process forensics before `/mcp` fixed it in one call. (Carries forward the content of the still-open `fix/voice-wedged-relay-diagnostic` PR, which this supersedes — it was branched before v0.13.0 and is now `CONFLICTING`.)
+- docs: `/tts-mcp:interview` now says plainly what it does **not** do — one state file holds one mode, so `interview` and `on` are mutually exclusive, and a driving session hears the questions but not the answers. That is a real gap for hands-free use, recorded rather than papered over.
+
 ## v0.13.0
 
 - feat(voice): **the voice mode now persists for the whole session** instead of fading as the conversation grows. A skill cannot hold a mode across turns on its own, so the mode is written to a per-session state file (`~/.claude/state/voice/<session-id>.json`) and re-injected on every prompt by a `UserPromptSubmit` hook (`~/.claude/hooks/voice-mode.py`). Because the hook re-fires each turn, the mode also survives `/compact` — the turn after a compact re-arms it identically. Keyed on the session id, so one session's toggle never reaches another, and it costs one short line per turn.
