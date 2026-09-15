@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.13.0
 
 - feat(voice): **the voice mode now persists for the whole session** instead of fading as the conversation grows. A skill cannot hold a mode across turns on its own, so the mode is written to a per-session state file (`~/.claude/state/voice/<session-id>.json`) and re-injected on every prompt by a `UserPromptSubmit` hook (`~/.claude/hooks/voice-mode.py`). Because the hook re-fires each turn, the mode also survives `/compact` — the turn after a compact re-arms it identically. Keyed on the session id, so one session's toggle never reaches another, and it costs one short line per turn.
 - feat(commands): new **`/tts-mcp:on`** and **`/tts-mcp:off`** — a two-command toggle for the common case. `on` sets `narrate` (attention signals plus a spoken gist of every substantive answer); `off` clears it. Nothing collapsed: `/tts-mcp:voice on|narrate|interview|off|status|restart` keeps the full surface.
