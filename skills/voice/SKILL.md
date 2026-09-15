@@ -1,12 +1,12 @@
 ---
 name: voice
-description: 'Manage TTS voice mode for the current session and apply the spoken-output playbook. Use when the user types /voice, asks to turn voice on/off, wants answers spoken aloud (narrate mode) or questions read aloud (interview mode), restart/fix the TTS server after audio goes silent (e.g. switching to AirPods), or asks how much the voice should say. Sole authority on spoken-output volume — no always-on rule competes with it, and the mode is persisted per session (state file + UserPromptSubmit hook) so it survives context growth and /compact. Activation speaks a one-line confirmation but runs no selftest — use /tts-mcp:voice-selfcheck to verify the audio path. Args: on | narrate | interview | off | status | restart.'
+description: 'Manage TTS voice mode for the current session and apply the spoken-output playbook. Use when the user types /voice, asks to turn voice on/off, wants answers spoken aloud (narrate mode) or questions read aloud (interview mode), restart/fix the TTS server after audio goes silent (e.g. switching to AirPods), or asks how much the voice should say. Sole authority on spoken-output volume; the mode persists per session until /tts-mcp:off. Args: on | narrate | interview | off | status | restart.'
 argument-hint: "[on|narrate|interview|off|status|restart]"
 ---
 
 ## What this does
 
-Controls whether Claude speaks via `mcp__tts__say` this session, and how much. **This skill is the sole authority on spoken-output volume** — there is no competing always-on rule in `~/.claude/CLAUDE.md`. Voice is off until someone invokes `/voice`; the chosen arg sets the level for the rest of the session.
+Controls whether Claude speaks via `mcp__tts__say` this session, and how much. **This skill is the sole authority on spoken-output *volume*.** The global `Voice Chat Brevity` rule in `~/.claude/CLAUDE.md` governs spoken *length* and composes with it — neither sets the other, and no competing rule sets volume. Voice is off until someone invokes `/voice`; the chosen arg sets the level for the rest of the session.
 
 **The mode is mechanical, not just advisory.** A skill cannot force behavior across turns on its own, so the mode is written to a per-session state file and re-injected on every prompt by a `UserPromptSubmit` hook (`~/.claude/hooks/voice-mode.py`, registered in `~/.claude/settings.json`). That is what makes it survive context growth and `/compact` — it no longer fades mid-session. The hook holds *whether* to speak; this skill is the playbook for *how*.
 
@@ -16,6 +16,8 @@ Controls whether Claude speaks via `mcp__tts__say` this session, and how much. *
 - `narrate` — `on` **plus a spoken gist of every substantive answer**: 1–3 sentences of headline, never the reply verbatim. For when the user is away from the screen but still wants to follow the work.
 - `interview` — `on` **plus every question that needs the user's input**, one at a time (used when the user is away from the keyboard / driving by voice).
 - `off` — disable: stop calling `mcp__tts__say` for the rest of the session.
+
+⚠️ **`/tts-mcp:on` and `/tts-mcp:voice on` set different levels.** The shortcut `/tts-mcp:on` means `narrate` (the away-from-screen level); the bare arg `on` means attention-signals-only. Re-running `/tts-mcp:voice on` after `/tts-mcp:on` silently downgrades you.
 - `status` — report the current mode and voice.
 - `restart` (alias `fix`) — restart the TTS server. Use when audio goes silent after switching the Mac's output device (AirPods, headphones): the server binds the default output device once at process init, so a device switch leaves it playing into the void. Runs `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp`, waits for `/health`, then verifies via `/tts-mcp:voice-selfcheck`. See the Restart section below.
 
@@ -34,6 +36,21 @@ rm -f ~/.claude/state/voice/$CLAUDE_CODE_SESSION_ID.json
 `status` and `restart` do not touch the state file. Never `rm -rf ~/.claude/state/voice/` — the directory is shared by every session; delete only the one file.
 
 Then confirm the new mode in one line (e.g. `🔊 voice: interview (ryan)` or `🔇 voice: off`).
+
+## Prerequisites
+
+- `mcp__tts__say` bound in this session — if it errors `No such tool available`, the binding is gone and a session restart is the only fix. No HTTP fallback (see Restart below).
+- `~/.claude/hooks/voice-mode.py` registered under `UserPromptSubmit` in `~/.claude/settings.json`. That registration is what makes the mode persist; without it the skill still speaks this turn, but the mode will not survive to the next.
+- Server reachable — launchd `com.bborbe.tts-mcp`, HTTP `127.0.0.1:12000`.
+- A writable `~/.claude/state/voice/`.
+
+## Success Criteria
+
+- The state file for this session exists with the chosen `mode` — or is deleted, for `off`.
+- One status line printed: `🔊 voice: <mode> (<voice>)` or `🔇 voice: off`.
+- For `on` / `narrate` / `interview`: `mcp__tts__say` returned a `message_id` for the activation line.
+- For `restart`: `/health` returns `ok`, and `/tts-mcp:voice-selfcheck` passes.
+- For `status`: mode and voice reported, with **no** state-file write.
 
 ## Skipping, pausing, resuming
 
@@ -147,7 +164,7 @@ The screen is the detail channel; voice is the attention channel. A `say()` cost
 - Tool-call chatter ("Let me check that file.").
 - Code, long lists, or file dumps — voice is the wrong shape for them.
 - The reply verbatim. Even in `narrate`, speak the headline and let the screen carry the detail; never let voice and text be the same content at the same length.
-- Nothing on account of the user appearing present. This bullet used to read *"anything at all when the user is clearly sitting there watching it scroll by"* — which killed `narrate` after its first utterance, the reported bug. An explicit `on` / `narrate` / `interview` **is** the request: speak even while they watch. (Changed 2026-09-15.)
+- Nothing on account of the user appearing present. An explicit `on` / `narrate` / `interview` **is** the request — speak even while they watch.
 
 `narrate` is the mode to reach for when the user asks a question *and* turns voice on in the same breath — that pairing means they want the answer in their ears, not just on screen.
 
@@ -159,5 +176,5 @@ The screen is the detail channel; voice is the attention channel. A `say()` cost
 - Which engine (and therefore which voice) → `/tts-mcp:engine`. That is the other genuinely session-scoped setting: the server holds every declared engine at once, and each `say` names the one to use.
 - **Persistence** → `~/.claude/state/voice/<session-id>.json`, written by this skill and by `/tts-mcp:on` / `/tts-mcp:off`, re-injected each turn by `~/.claude/hooks/voice-mode.py` (registered in `~/.claude/settings.json` under `UserPromptSubmit`). Per session by construction — the file is keyed on the session id, so one session's toggle never reaches another.
 - No always-on default. Voice stays silent until an arg is invoked — deliberate, so a session is never noisy without someone asking for it.
-- **Do not add a `~/.claude/CLAUDE.md` rule to make voice default-on.** That was tried (2026-09-03 → 2026-09-11) and deleted: a global rule is fleet-wide, so it cannot express a per-session toggle, and it silently outranked this skill's mode arg — `/voice on … explain X` spoke the activation line and then wrote the explanation to screen only. The state file + hook is the supported persistence path.
-- An **output style** is not the persistence path either. `outputStyle` is stored per *project* in `.claude/settings.local.json`, so selecting one makes every concurrent session in that project speak. `Voice Narrate` / `Voice On` were deleted 2026-09-15 for that reason.
+- **Do not add a `~/.claude/CLAUDE.md` rule to make voice default-on.** Tried 2026-09-03, deleted 2026-09-11: a global rule is fleet-wide, so it cannot express a per-session toggle, and it silently outranked this skill's mode arg.
+- **An output style is not the persistence path either.** `outputStyle` is stored per *project* in `.claude/settings.local.json`, so selecting one makes every concurrent session in that project speak. `Voice Narrate` was deleted 2026-09-15; `Voice On` survives only as the Boss vault's project default, and nothing else should pin it. See CHANGELOG 2026-09-15.
