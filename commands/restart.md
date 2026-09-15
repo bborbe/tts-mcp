@@ -24,8 +24,8 @@ A dropped binding does not heal on `launchctl kickstart` — the server respawns
 
 1. `launchctl kickstart -k gui/$(id -u)/com.bborbe.tts-mcp` (KeepAlive respawns a fresh process against the current default device).
 2. Poll health until ready — `curl -s http://127.0.0.1:12000/health`. `/health` returns `ok` *before* the model is loaded, so also allow the first `say` to lag. Model reload is ~1-3s on `engine: qwen3`, ~15-20s on `engine: voxtral`.
-3. Verify: run `/tts-mcp:voice-selfcheck`.
-4. If still silent after restart, it is not the device binding — re-read the table above, then follow the troubleshooting in `/tts-mcp:voice-selfcheck` (server unreachable / stuck queue / synth error).
+3. Verify: run `/tts-mcp:selfcheck`.
+4. If still silent after restart, it is not the device binding — re-read the table above, then follow the troubleshooting in `/tts-mcp:selfcheck` (server unreachable / stuck queue / synth error).
 
 Caveats: in-flight messages are dropped across a restart; message IDs reset; **one server serves all Claude sessions, so a restart affects every session's relay** — including wedging their relays against the fresh process, which is the third case above.
 
