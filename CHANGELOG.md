@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- refactor: **`/tts-mcp:voice-selfcheck` is renamed `/tts-mcp:selfcheck`** — the last command still carrying the `voice` prefix, and the prefix was misleading: it verifies the *audio path* (server reachable, queue moving, device bound), not the voice mode. `restart.md` and `references/voice-playbook.md` are repointed; behaviour is unchanged. With this, no command in the plugin is named after the mode dial that was removed.
+
 ## v0.14.0
 
 - feat: **the voice command surface is now one command per thing.** `/tts-mcp:voice` is gone; in its place: `/tts-mcp:on` (attention signals plus a spoken gist of every substantive answer), `/tts-mcp:interview` (every question needing input, read aloud one at a time), `/tts-mcp:off`, `/tts-mcp:status`, `/tts-mcp:restart`. The old surface overloaded one word — `on` meant attention-signals-only as a mode arg, but narrate as a command, so re-running `/tts-mcp:voice on` after `/tts-mcp:on` silently downgraded you. There is no mode dial left to get wrong, and nothing overlaps.

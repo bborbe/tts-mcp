@@ -2,7 +2,7 @@
 
 The canonical rules for **how** Claude speaks. Read this when a `/tts-mcp:*` voice command tells you to.
 
-The commands decide *whether* to speak (`/tts-mcp:on`, `/tts-mcp:off`, `/tts-mcp:interview`); this file decides *how*. Which engine and voice is `/tts-mcp:engine`. Verifying the audio path is `/tts-mcp:voice-selfcheck`.
+The commands decide *whether* to speak (`/tts-mcp:on`, `/tts-mcp:off`, `/tts-mcp:interview`); this file decides *how*. Which engine and voice is `/tts-mcp:engine`. Verifying the audio path is `/tts-mcp:selfcheck`.
 
 ## The enablement model
 
@@ -87,7 +87,7 @@ An MCP call only lands when Claude is between tool calls, so it is the slow path
 
 Fire-and-forget: say it, print the one-line status, done. Do **not** ask "did you hear it?", do not poll `get_status`, do not block on the result. Skip the utterance for `off` and `status` — speaking is exactly what `off` is turning off.
 
-The spoken line is a courtesy signal, **not** a selftest — no confirmation gate, no round-trip. When you actually need proof the audio path works — silence mid-session, a device switch, or the user about to walk away and rely on voice alerts — run `/tts-mcp:voice-selfcheck`.
+The spoken line is a courtesy signal, **not** a selftest — no confirmation gate, no round-trip. When you actually need proof the audio path works — silence mid-session, a device switch, or the user about to walk away and rely on voice alerts — run `/tts-mcp:selfcheck`.
 
 ## Prerequisites
 
