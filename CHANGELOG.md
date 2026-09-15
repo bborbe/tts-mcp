@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat(voice): **the voice mode now persists for the whole session** instead of fading as the conversation grows. A skill cannot hold a mode across turns on its own, so the mode is written to a per-session state file (`~/.claude/state/voice/<session-id>.json`) and re-injected on every prompt by a `UserPromptSubmit` hook (`~/.claude/hooks/voice-mode.py`). Because the hook re-fires each turn, the mode also survives `/compact` — the turn after a compact re-arms it identically. Keyed on the session id, so one session's toggle never reaches another, and it costs one short line per turn.
+- feat(commands): new **`/tts-mcp:on`** and **`/tts-mcp:off`** — a two-command toggle for the common case. `on` sets `narrate` (attention signals plus a spoken gist of every substantive answer); `off` clears it. Nothing collapsed: `/tts-mcp:voice on|narrate|interview|off|status|restart` keeps the full surface.
+- fix(voice): **removed the "never speak when the user is clearly sitting there watching it scroll by" rule.** It was the direct cause of the reported "first utterance, then silence" symptom — the activation line spoke, then the skill's own silence rule suppressed every answer after it. An explicit `on` / `narrate` / `interview` *is* the request; the skill now says to speak even while the user watches. The `narrate`-owed-but-went-unspoken failure is called out as the thing this mode exists to prevent.
+- docs(voice): the **Persistence note** now names the state file and hook as the supported path, and records why the two rejected alternatives were rejected — a `~/.claude/CLAUDE.md` rule (fleet-wide, so it cannot express a per-session toggle; it silently outranked the mode arg, and was deleted 2026-09-11) and an output style (`outputStyle` is stored per *project*, so selecting one makes every concurrent session speak; `Voice Narrate` / `Voice On` deleted 2026-09-15).
+
 ## v0.12.0
 
 - feat(server): message history now **survives a server restart** — every status transition persists the full `statuses` dict to `data/history.json` (atomic temp-file write), and startup restores it via `ServerState.load_persisted`. Anything that was mid-flight (queued/loading/playing/paused) when the server stopped is demoted to `cancelled` on load: its work item lived only in the in-memory queue and can never play. Eviction still applies, so the persisted history is bounded by the same `STATUS_TTL_SECONDS` as the in-memory one. Was previously "Out of Scope" in the pause/resume/UI task — now closed.
