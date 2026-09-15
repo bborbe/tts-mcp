@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.14.0
 
 - feat: **the voice command surface is now one command per thing.** `/tts-mcp:voice` is gone; in its place: `/tts-mcp:on` (attention signals plus a spoken gist of every substantive answer), `/tts-mcp:interview` (every question needing input, read aloud one at a time), `/tts-mcp:off`, `/tts-mcp:status`, `/tts-mcp:restart`. The old surface overloaded one word — `on` meant attention-signals-only as a mode arg, but narrate as a command, so re-running `/tts-mcp:voice on` after `/tts-mcp:on` silently downgraded you. There is no mode dial left to get wrong, and nothing overlaps.
 - feat: the **speaking playbook moved to `docs/voice-playbook.md`** — the canonical rule source the commands read at runtime, instead of a skill body that was also carrying the mode dial. `skills/voice/` is deleted; all five commands point at the doc.
