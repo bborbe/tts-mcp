@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.15.0
 
 - refactor: **`/tts-mcp:voice-selfcheck` is renamed `/tts-mcp:selfcheck`** — the last command still carrying the `voice` prefix, and the prefix was misleading: it verifies the *audio path* (server reachable, queue moving, device bound), not the voice mode. `restart.md` and `references/voice-playbook.md` are repointed; behaviour is unchanged. With this, no command in the plugin is named after the mode dial that was removed.
 
