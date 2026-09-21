@@ -2,7 +2,7 @@
 
 The canonical rules for **how** Claude speaks. Read this when a `/tts-mcp:*` voice command tells you to.
 
-The commands decide *whether* to speak (`/tts-mcp:on`, `/tts-mcp:off`, `/tts-mcp:interview`); this file decides *how*. Which engine and voice is `/tts-mcp:engine`. Verifying the audio path is `/tts-mcp:selfcheck`.
+The commands decide *whether* to speak (`/tts-mcp:on`, `/tts-mcp:attention`, `/tts-mcp:off`, `/tts-mcp:interview`); this file decides *how*. Which engine and voice is `/tts-mcp:engine`. Verifying the audio path is `/tts-mcp:selfcheck`.
 
 ## The enablement model
 
@@ -21,16 +21,21 @@ The screen is the detail channel; voice is the attention channel. A `say()` cost
 
 | Command | Attention signals | Answers | Every question |
 |---|---|---|---|
-| `/tts-mcp:on` | ✅ | ✅ 1–3 sentence gist | ❌ decisions only |
+| `/tts-mcp:on` | ✅ | ⚠️ only when the ACTION test passes — see **Attention Costs Operator** | ❌ decisions only |
+| `/tts-mcp:attention` | ✅ | ❌ never — the attention signal only | ❌ decisions only |
 | `/tts-mcp:interview` | ✅ | ❌ screen only | ✅ one at a time |
 | `/tts-mcp:off` | ❌ | ❌ | ❌ |
+
+⚠️ **The `on` Answers column is gated by the ACTION test, not by the answer being substantive.** Before speaking an answer, apply the test in **Attention Costs Operator** (`~/.claude/CLAUDE.md`, Operational) — *is there something the user must DO?* If the answer is no, stay silent and let the screen carry it. That rule is channel-independent and is the single source of truth for what the test admits, so it is referenced here by name and its detail is deliberately **not** duplicated — a second copy would drift from it.
+
+**`on` vs `attention`.** `on` still speaks a short gist, but only for turns that pass the ACTION test. `attention` is the stricter mode: it speaks the attention signal and nothing else, never a gist — for when the channel should carry only what you must act on. Everything else in this playbook (voice, `sender` tag, throwaway lead, terseness) applies to both.
 
 **Attention signals** (spoken in every mode except off):
 
 - **Completion / failure** of background or long-running work — `say("PR 42 merged.")`, `say("Build failed in capitalcom-gateway.")`.
 - A **decision point** where you're waiting on the user — `say("Needs your input.")`.
 
-⚠️ **`interview` speaks questions, not answers.** One state file holds one mode, so `interview` and `on` are mutually exclusive: while driving, you hear what you are being asked but the reply stays on screen. If you want both, that is a real gap — say so rather than assuming `interview` covers it.
+⚠️ **`interview` speaks questions, not answers.** One state file holds one mode, so `interview`, `on` and `attention` are mutually exclusive: while driving, you hear what you are being asked but the reply stays on screen. If you want both, that is a real gap — say so rather than assuming `interview` covers it.
 
 ## How to speak
 
@@ -80,9 +85,10 @@ An MCP call only lands when Claude is between tool calls, so it is the slow path
 
 ## Spoken confirmation on activation
 
-`/tts-mcp:on` and `/tts-mcp:interview` **also speak the confirmation** — the first thing the new mode does is use itself:
+`/tts-mcp:on`, `/tts-mcp:attention` and `/tts-mcp:interview` **also speak the confirmation** — the first thing the new mode does is use itself:
 
 - `on` → `"Okay. Voice on."`
+- `attention` → `"Okay. Attention mode."`
 - `interview` → `"Okay. Interview mode activated."`
 
 Fire-and-forget: say it, print the one-line status, done. Do **not** ask "did you hear it?", do not poll `get_status`, do not block on the result. Skip the utterance for `off` and `status` — speaking is exactly what `off` is turning off.

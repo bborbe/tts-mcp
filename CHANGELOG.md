@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: **`/tts-mcp:on` no longer speaks every substantive answer** — the playbook's Answers column was an unconditional licence, which produced 20+ spoken interruptions in a single session with the large majority carrying nothing the operator had to act on. It now defers to the ACTION test in `Attention Costs Operator` (`~/.claude/CLAUDE.md`), referenced by name rather than restated so the two cannot drift. `commands/on.md`'s description and body are repointed the same way.
+- feat: **new `/tts-mcp:attention` mode** — attention signals only, never an answer gist, for reserving the voice channel to what you must act on. `references/voice-playbook.md` gains its table row plus the `on` vs `attention` distinction. No hook change: `hooks/voice-mode.py` validates only `OFF_MODES` and passes any other mode string through unmodified.
+
 ## v0.15.0
 
 - refactor: **`/tts-mcp:voice-selfcheck` is renamed `/tts-mcp:selfcheck`** — the last command still carrying the `voice` prefix, and the prefix was misleading: it verifies the *audio path* (server reachable, queue moving, device bound), not the voice mode. `restart.md` and `references/voice-playbook.md` are repointed; behaviour is unchanged. With this, no command in the plugin is named after the mode dial that was removed.
