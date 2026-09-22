@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-
-import { describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
 
 import {
   attributionLabel,
@@ -15,10 +15,10 @@ import {
   type SessionName,
 } from "./session.js";
 
+type Chain = Record<number, [string, number]>;
+
 /** Build a `readProcess` stub from a pid -> [comm, ppid] map. */
-function chainOf(
-  links: Record<number, [string, number]>,
-): (pid: number) => ProcessInfo | null {
+function chainOf(links: Chain): (pid: number) => ProcessInfo | null {
   return (pid) => {
     const link = links[pid];
     return link === undefined ? null : { comm: link[0], ppid: link[1] };
@@ -26,7 +26,7 @@ function chainOf(
 }
 
 function depsFor(
-  links: Record<number, [string, number]>,
+  links: Chain,
   registry: Record<number, SessionName | null>,
 ): SessionDeps {
   return {
@@ -39,8 +39,11 @@ function depsFor(
  * The real chain shape measured on this machine, where the relay runs as
  * `npm exec tsx <path>` and its parent is the session's `claude` process.
  */
-const realChain: Record<number, [string, number]> = {
-  95110: ["npm exec tsx /Users/bborbe/Documents/workspaces/tts-mcp/mcp/tts-mcp.ts", 94037],
+const realChain: Chain = {
+  95110: [
+    "npm exec tsx /Users/bborbe/Documents/workspaces/tts-mcp/mcp/tts-mcp.ts",
+    94037,
+  ],
   94037: ["claude", 93926],
   93926: ["bash", 45681],
   45681: ["/Applications/WezTerm.app/Contents/MacOS/wezterm-gui", 1],
@@ -57,69 +60,62 @@ function registryDirWith(entries: Record<string, string>): string {
 
 describe("isClaudeComm", () => {
   it("matches a bare claude name, as ps reports it on this machine", () => {
-    expect(isClaudeComm("claude")).toBe(true);
+    assert.equal(isClaudeComm("claude"), true);
   });
 
   it("matches an absolute path to claude", () => {
-    expect(isClaudeComm("/usr/local/bin/claude")).toBe(true);
+    assert.equal(isClaudeComm("/usr/local/bin/claude"), true);
   });
 
   it("does not match a sibling binary whose name merely starts with claude", () => {
-    expect(isClaudeComm("/usr/local/bin/claude-helper")).toBe(false);
+    assert.equal(isClaudeComm("/usr/local/bin/claude-helper"), false);
   });
 
   it("does not match a directory that happens to be named claude", () => {
-    expect(isClaudeComm("/opt/claude/bin/node")).toBe(false);
+    assert.equal(isClaudeComm("/opt/claude/bin/node"), false);
   });
 
   it("does not match other processes", () => {
-    expect(isClaudeComm("bash")).toBe(false);
-    expect(
+    assert.equal(isClaudeComm("bash"), false);
+    assert.equal(
       isClaudeComm("/Applications/WezTerm.app/Contents/MacOS/wezterm-gui"),
-    ).toBe(false);
+      false,
+    );
   });
 });
 
 describe("findClaudeAncestor", () => {
   it("finds the claude ancestor two hops up the real chain", () => {
-    expect(findClaudeAncestor(95110, chainOf(realChain))).toBe(94037);
+    assert.equal(findClaudeAncestor(95110, chainOf(realChain)), 94037);
   });
 
   it("matches a comm reported as an absolute path, not only a bare name", () => {
     // `ps -o comm=` returns a bare `claude` on this machine but a full path for
-    // other processes, so the match must not assume the bare form. The chain
-    // stops below pid 1 — the walk never examines launchd.
-    const links = {
-      2: ["tsx", 3],
-      3: ["/usr/local/bin/claude", 4],
-      4: ["launchd", 1],
-    } as Record<number, [string, number]>;
-    expect(findClaudeAncestor(2, chainOf(links))).toBe(3);
+    // other processes, so the match must not assume the bare form.
+    assert.equal(
+      findClaudeAncestor(2, chainOf({ 2: ["tsx", 3], 3: ["/usr/local/bin/claude", 4], 4: ["launchd", 1] })),
+      3,
+    );
   });
 
   it("never examines pid 1, which is launchd rather than a session", () => {
-    const links = { 2: ["tsx", 1], 1: ["claude", 0] } as Record<
-      number,
-      [string, number]
-    >;
-    expect(findClaudeAncestor(2, chainOf(links))).toBeNull();
+    assert.equal(findClaudeAncestor(2, chainOf({ 2: ["tsx", 1], 1: ["claude", 0] })), null);
   });
 
   it("returns null when no ancestor is claude", () => {
-    const links = { 3: ["tsx", 2], 2: ["bash", 1], 1: ["launchd", 0] } as Record<
-      number,
-      [string, number]
-    >;
-    expect(findClaudeAncestor(3, chainOf(links))).toBeNull();
+    assert.equal(
+      findClaudeAncestor(3, chainOf({ 3: ["tsx", 2], 2: ["bash", 1], 1: ["launchd", 0] })),
+      null,
+    );
   });
 
   it("returns null when the chain breaks mid-walk", () => {
     // The parent pid is gone — `ps` reports that as a non-zero exit.
-    expect(findClaudeAncestor(4, chainOf({ 4: ["tsx", 99] }))).toBeNull();
+    assert.equal(findClaudeAncestor(4, chainOf({ 4: ["tsx", 99] })), null);
   });
 
   it("terminates on a self-parenting pid instead of looping forever", () => {
-    expect(findClaudeAncestor(5, chainOf({ 5: ["tsx", 5] }))).toBeNull();
+    assert.equal(findClaudeAncestor(5, chainOf({ 5: ["tsx", 5] })), null);
   });
 });
 
@@ -132,7 +128,7 @@ describe("readRegistryName", () => {
         pid: 94037,
       }),
     });
-    expect(readRegistryName(94037, dir)).toEqual({
+    assert.deepEqual(readRegistryName(94037, dir), {
       name: "Fleet Manager",
       nameSource: "user",
     });
@@ -142,7 +138,7 @@ describe("readRegistryName", () => {
     const dir = registryDirWith({
       "1.json": JSON.stringify({ name: "  Manager Layer  ", nameSource: "user" }),
     });
-    expect(readRegistryName(1, dir)).toEqual({
+    assert.deepEqual(readRegistryName(1, dir), {
       name: "Manager Layer",
       nameSource: "user",
     });
@@ -152,39 +148,39 @@ describe("readRegistryName", () => {
     const dir = registryDirWith({
       "2.json": JSON.stringify({ name: "", nameSource: "user" }),
     });
-    expect(readRegistryName(2, dir)).toBeNull();
+    assert.equal(readRegistryName(2, dir), null);
   });
 
   it("returns null for a whitespace-only name", () => {
     const dir = registryDirWith({
       "3.json": JSON.stringify({ name: "   ", nameSource: "user" }),
     });
-    expect(readRegistryName(3, dir)).toBeNull();
+    assert.equal(readRegistryName(3, dir), null);
   });
 
   it("returns null for a missing name field", () => {
     const dir = registryDirWith({ "4.json": JSON.stringify({ pid: 4 }) });
-    expect(readRegistryName(4, dir)).toBeNull();
+    assert.equal(readRegistryName(4, dir), null);
   });
 
   it("returns null for a non-string name", () => {
     const dir = registryDirWith({ "5.json": JSON.stringify({ name: 42 }) });
-    expect(readRegistryName(5, dir)).toBeNull();
+    assert.equal(readRegistryName(5, dir), null);
   });
 
-  it("returns null when nameSource is absent, keeping the name", () => {
+  it("returns a null nameSource when the field is absent, keeping the name", () => {
     const dir = registryDirWith({ "6.json": JSON.stringify({ name: "Solo" }) });
-    expect(readRegistryName(6, dir)).toEqual({ name: "Solo", nameSource: null });
+    assert.deepEqual(readRegistryName(6, dir), { name: "Solo", nameSource: null });
   });
 
   it("returns null for malformed JSON", () => {
     const dir = registryDirWith({ "7.json": "{ not json" });
-    expect(readRegistryName(7, dir)).toBeNull();
+    assert.equal(readRegistryName(7, dir), null);
   });
 
   it("returns null when the registry entry does not exist", () => {
     const dir = registryDirWith({});
-    expect(readRegistryName(83292, dir)).toBeNull();
+    assert.equal(readRegistryName(83292, dir), null);
   });
 });
 
@@ -193,7 +189,7 @@ describe("resolveSessionName", () => {
     const deps = depsFor(realChain, {
       94037: { name: "Fleet Manager", nameSource: "user" },
     });
-    expect(resolveSessionName(95110, deps)).toEqual({
+    assert.deepEqual(resolveSessionName(95110, deps), {
       name: "Fleet Manager",
       nameSource: "user",
     });
@@ -201,15 +197,12 @@ describe("resolveSessionName", () => {
 
   it("returns null when the claude ancestor has no registry entry", () => {
     // Measured on this machine: not every session has a registry file.
-    expect(resolveSessionName(95110, depsFor(realChain, {}))).toBeNull();
+    assert.equal(resolveSessionName(95110, depsFor(realChain, {})), null);
   });
 
   it("returns null when there is no claude ancestor at all", () => {
-    const links = { 7: ["tsx", 6], 6: ["bash", 1], 1: ["launchd", 0] } as Record<
-      number,
-      [string, number]
-    >;
-    expect(resolveSessionName(7, depsFor(links, {}))).toBeNull();
+    const links: Chain = { 7: ["tsx", 6], 6: ["bash", 1], 1: ["launchd", 0] };
+    assert.equal(resolveSessionName(7, depsFor(links, {})), null);
   });
 
   it("does not throw when the process walk fails", () => {
@@ -219,8 +212,8 @@ describe("resolveSessionName", () => {
         throw new Error("must not be reached");
       },
     };
-    expect(() => resolveSessionName(1, deps)).not.toThrow();
-    expect(resolveSessionName(1, deps)).toBeNull();
+    assert.doesNotThrow(() => resolveSessionName(1, deps));
+    assert.equal(resolveSessionName(1, deps), null);
   });
 });
 
@@ -229,28 +222,29 @@ describe("attributionLabel", () => {
 
   it("prefers the session name over a deliberately bad caller sender", () => {
     // The defect this fixes: a caller passing a poor value, not omitting one.
-    expect(attributionLabel(session, "worker-manager BRO-21546")).toBe(
+    assert.equal(
+      attributionLabel(session, "worker-manager BRO-21546"),
       "Fleet Manager",
     );
   });
 
   it("prefers the session name when the caller passes nothing", () => {
-    expect(attributionLabel(session, null)).toBe("Fleet Manager");
-    expect(attributionLabel(session, undefined)).toBe("Fleet Manager");
+    assert.equal(attributionLabel(session, null), "Fleet Manager");
+    assert.equal(attributionLabel(session, undefined), "Fleet Manager");
   });
 
   it("falls back to the caller sender when no name resolved", () => {
-    expect(attributionLabel(null, "inbox triage")).toBe("inbox triage");
+    assert.equal(attributionLabel(null, "inbox triage"), "inbox triage");
   });
 
   it("falls back to null when neither is available", () => {
-    expect(attributionLabel(null, null)).toBeNull();
-    expect(attributionLabel(null, undefined)).toBeNull();
+    assert.equal(attributionLabel(null, null), null);
+    assert.equal(attributionLabel(null, undefined), null);
   });
 
   it("falls back to the caller sender when the caller passes an empty string", () => {
     // An empty string is falsy but not nullish — `??` keeps it, so this asserts
     // the documented behaviour rather than a surprise.
-    expect(attributionLabel(null, "")).toBe("");
+    assert.equal(attributionLabel(null, ""), "");
   });
 });
