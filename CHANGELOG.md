@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: **TTS messages are attributed to the real Claude Code session instead of a caller-chosen string.** The relay now resolves its own session name once at startup — walk the `ppid` chain to the ancestor whose `comm` is `claude`, read `~/.claude/sessions/<pid>.json`, take `name` — and that name wins over the caller-supplied `sender`, so the web UI and `GET /state` can no longer be misled by a poor label like `"worker manager"`. The caller's value is kept as secondary detail on the relay's log line rather than dropped; the `/say` wire shape is unchanged. Resolution is best-effort and cached at startup: a miss degrades to the caller's `sender`, then to null, and can never block or delay a `say`. That is a deliberate, scoped carve-out from `AGENTS.md`'s "fail fast — never swallow errors" — it is not silent (a miss is logged at error level) and request failures on the `say` path still propagate. `references/voice-playbook.md` is repointed accordingly: `sender` is now a fallback, not the displayed label.
+
 ## v0.16.0
 
 - feat: **`/tts-mcp:on` no longer speaks every substantive answer** — the playbook's Answers column was an unconditional licence, which produced 20+ spoken interruptions in a single session with the large majority carrying nothing the operator had to act on. It now defers to the ACTION test in `Attention Costs Operator` (`~/.claude/CLAUDE.md`), referenced by name rather than restated so the two cannot drift. `commands/on.md`'s description and body are repointed the same way.

@@ -332,7 +332,9 @@ at request time rather than failing later inside the worker.
 
 `sender` is optional and names the session that produced the message (e.g. the Claude session tag). It is stored with
 the message and shown in the web UI and `/state`, so it is clear which session said what when several sessions
-interleave.
+interleave. A direct HTTP client controls this value. The MCP relay does not pass yours through unchanged — it resolves
+the calling Claude Code session's own name and sends that, using your value only as a fallback for a session it cannot
+resolve (see the MCP relay section below).
 
 Returns `202 Accepted` with a message ID and queue position. Audio plays through the server's speakers.
 
@@ -423,16 +425,28 @@ still ends it as `cancelled`. Finished statuses expire after 1 hour.
 
 ## MCP Server
 
-The MCP server (`mcp/tts-mcp.ts`) is a transparent relay between MCP clients and the FastAPI server. It exposes six tools:
+The MCP server (`mcp/tts-mcp.ts`) relays between MCP clients and the FastAPI server, with one deliberate exception to
+pass-through: it attributes every `say` to the calling Claude Code session (see [Attribution](#attribution) below). It
+exposes six tools:
 
 | Tool | Description |
 |------|-------------|
-| `say` | Queue text for speech synthesis with a specified voice (optional `instruct` on qwen3, optional `sender`) |
+| `say` | Queue text for speech synthesis with a specified voice (optional `instruct` on qwen3; `sender` is a fallback label — the session name normally wins) |
 | `cancel` | Stop the utterance that is playing, one named message, or the whole queue |
 | `pause` | Pause the utterance that is playing; resume from the same point with `resume` |
 | `resume` | Continue a paused utterance from exactly where it stopped |
 | `get_voices` | List all available voices |
 | `get_status` | Check status of a speech request by message ID |
+
+### Attribution
+
+Every `say` is labelled with the name of the Claude Code session that made the call. The relay resolves it once at
+startup — walk its parent-process chain to the `claude` ancestor, read that pid's entry in
+`~/.claude/sessions/<pid>.json`, take `name` — so the label follows `/rename` and needs no cooperation from the calling
+model. The tool's own `sender` argument is a fallback, used only for a session with no registry entry.
+
+Resolution is best-effort and cached at startup: it never throws and never delays a `say`. A miss is logged at error
+level and the utterance is spoken regardless.
 
 ### Setup
 

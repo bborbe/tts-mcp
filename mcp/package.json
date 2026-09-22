@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx tts-mcp.ts",
-    "inspect": "npx @modelcontextprotocol/inspector tsx tts-mcp.ts"
+    "inspect": "npx @modelcontextprotocol/inspector tsx tts-mcp.ts",
+    "test": "tsx --test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
