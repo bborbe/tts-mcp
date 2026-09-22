@@ -13,9 +13,19 @@ import { z } from "zod";
 
 import { loadServerUrl } from "./config.js";
 import { log } from "./logger.js";
+import { attributionLabel, resolveSessionName } from "./session.js";
 
 const HEALTH_TIMEOUT_MS = 3_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The Claude Code session this relay belongs to, resolved once at startup.
+ *
+ * Held rather than re-resolved per call: the answer cannot change while the
+ * relay lives, and a per-call lookup would put two process spawns and a file
+ * read on the latency path of every utterance.
+ */
+const sessionName = resolveSessionName();
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -182,20 +192,35 @@ server.tool(
       .string()
       .optional()
       .describe(
-        "Name of the session or sender that produced this message, e.g. the " +
-          "Claude session tag. Shown in the web UI and state endpoint so it is " +
-          "clear which session said what.",
+        "Fallback label, used only when this relay cannot resolve its own " +
+          "Claude Code session name. The resolved session name normally wins, " +
+          "so this value is kept as secondary detail rather than shown as the " +
+          "label.",
       ),
   },
   async ({ voice, text, instruct, engine, sender }) => {
+    // The session name wins over the caller's string. Defaulting only when
+    // `sender` is absent would change nothing here: the failure this fixes is a
+    // caller passing a *bad* value ("worker manager"), not omitting one — and
+    // once rendered, a bad-but-present name is indistinguishable from a good
+    // one. The caller's value is kept as secondary detail rather than dropped;
+    // it stays on this log line because the /say wire shape is unchanged.
+    const attributed = attributionLabel(sessionName, sender);
     log.info("say", {
       voice,
       engine: engine ?? "default",
       instruct: instruct ?? null,
-      sender: sender ?? null,
+      sender: attributed,
+      senderCaller: sender ?? null,
       text: text.slice(0, 80),
     });
-    return request("POST", "/say", { text, voice, instruct, engine, sender });
+    return request("POST", "/say", {
+      text,
+      voice,
+      instruct,
+      engine,
+      sender: attributed,
+    });
   },
 );
 

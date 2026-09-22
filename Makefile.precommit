@@ -25,9 +25,14 @@ typecheck:
 mcp-typecheck:
 	cd mcp && npm ci && npx tsc --noEmit
 
+.PHONY: mcp-test
+# Test the TypeScript MCP relay in mcp/ (npm ci installs the exact lockfile tree)
+mcp-test:
+	cd mcp && npm ci && npm test
+
 .PHONY: check
-# Run lint and typecheck (Python) plus the MCP relay typecheck
-check: lint typecheck mcp-typecheck
+# Run lint and typecheck (Python) plus the MCP relay typecheck and tests
+check: lint typecheck mcp-typecheck mcp-test
 
 .PHONY: test
 # Run tests with pytest (includes tests/architecture)
