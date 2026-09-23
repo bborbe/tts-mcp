@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.17.1
 
 - fix: **message rows no longer wrap onto a third line when the sender is long.** v0.17.0 made the sender a full Claude Code session name, which can outrun the row and wrapped the status/engine/name line — pushing the message down and reading as three lines where there should be two. The meta row is now `nowrap` and only the sender gives way: it truncates with an ellipsis and keeps the whole name in its `title`, so the attribution stays reachable on hover. The current-message header gets the same treatment. `escapeAttr` is added alongside `escapeHtml`, which goes through `textContent` and so does not escape quotes — safe for element text, unsafe in an attribute value.
 
