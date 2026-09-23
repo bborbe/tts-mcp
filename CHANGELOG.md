@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- fix: **message rows no longer wrap onto a third line when the sender is long.** v0.17.0 made the sender a full Claude Code session name, which can outrun the row and wrapped the status/engine/name line — pushing the message down and reading as three lines where there should be two. The meta row is now `nowrap` and only the sender gives way: it truncates with an ellipsis and keeps the whole name in its `title`, so the attribution stays reachable on hover. The current-message header gets the same treatment. `escapeAttr` is added alongside `escapeHtml`, which goes through `textContent` and so does not escape quotes — safe for element text, unsafe in an attribute value.
+
 ## v0.17.0
 
 - feat: **TTS messages are attributed to the real Claude Code session instead of a caller-chosen string.** The relay now resolves its own session name once at startup — walk the `ppid` chain to the ancestor whose `comm` is `claude`, read `~/.claude/sessions/<pid>.json`, take `name` — and that name wins over the caller-supplied `sender`, so the web UI and `GET /state` can no longer be misled by a poor label like `"worker manager"`. The caller's value is kept as secondary detail on the relay's log line rather than dropped; the `/say` wire shape is unchanged. Resolution is best-effort and cached at startup: a miss degrades to the caller's `sender`, then to null, and can never block or delay a `say`. That is a deliberate, scoped carve-out from `AGENTS.md`'s "fail fast — never swallow errors" — it is not silent (a miss is logged at error level) and request failures on the `say` path still propagate. `references/voice-playbook.md` is repointed accordingly: `sender` is now a fallback, not the displayed label.

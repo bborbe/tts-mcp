@@ -38,13 +38,18 @@
       padding: 16px;
       margin-bottom: 16px;
     }
-    .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: nowrap; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--idle); }
     .dot.playing { background: var(--playing); }
     .dot.paused { background: var(--paused); }
     .dot.error { background: var(--error); }
     .status-label { font-weight: 600; text-transform: uppercase; font-size: 12px; letter-spacing: 0.06em; }
-    .sender { color: var(--muted); font-size: 13px; margin-left: auto; }
+    /* The sender is a full session name now, and one can outrun the row. It
+       truncates rather than wrapping, and keeps the whole value in its `title`. */
+    .sender {
+      color: var(--muted); font-size: 13px; margin-left: auto;
+      min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .text { font-size: 15px; line-height: 1.45; }
     button {
       background: var(--accent);
@@ -87,7 +92,12 @@
       font-size: 14px;
     }
     .history-item:last-child { border-bottom: none; }
-    .history-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
+    /* Badge, engine and Replay never shrink; only the sender gives way. A long
+       session name truncates instead of wrapping the meta row onto a second line
+       and pushing the message onto a third. */
+    .history-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; font-size: 12px; color: var(--muted); flex-wrap: nowrap; }
+    .history-meta > * { flex: 0 0 auto; white-space: nowrap; }
+    .history-sender { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .badge { border-radius: 4px; padding: 1px 7px; font-size: 11px; text-transform: uppercase; font-weight: 600; }
     .badge.queued { background: rgba(240, 180, 41, 0.15); color: var(--paused); }
     .badge.playing { background: rgba(79, 140, 255, 0.15); color: var(--accent); }
@@ -177,13 +187,16 @@
     function renderRow(m, replayIndex) {
       const label = STATE_LABEL[m.status] || m.status;
       const badge = '<span class="badge ' + (label === "played" ? "completed" : label) + '">' + label + "</span>";
-      const sender = " · " + (m.sender || UNKNOWN_SENDER);
+      const senderName = m.sender || UNKNOWN_SENDER;
+      // The whole name stays reachable in the title: it is truncated only when the
+      // row would otherwise wrap, and the name is the attribution this row exists for.
+      const sender = '<span class="history-sender" title="' + escapeAttr(senderName) + '"> · ' + escapeHtml(senderName) + "</span>";
       const replay = replayIndex !== undefined
         ? '<button class="replay" data-i="' + replayIndex + '" title="Speak this message again">Replay</button>'
         : "";
       return (
         '<div class="history-item">' +
-          '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span><span>" + sender + "</span>" + replay +
+          '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span>" + sender + replay +
           "</div>" +
           '<div class="history-text">' + escapeHtml(m.text) + "</div>" +
         "</div>"
@@ -204,7 +217,9 @@
       // A missing sender is rendered explicitly, never as blank: an empty string is
       // indistinguishable from "no sender field at all", which is how the attribution
       // gap stayed invisible after the field shipped.
-      $("sender").textContent = cur ? (cur.sender || UNKNOWN_SENDER) : "";
+      const headerSender = cur ? (cur.sender || UNKNOWN_SENDER) : "";
+      $("sender").textContent = headerSender;
+      $("sender").title = headerSender;
       $("current-text").textContent = cur ? cur.text : "Nothing playing";
 
       const history = $("history");
@@ -246,6 +261,12 @@
       const div = document.createElement("div");
       div.textContent = s;
       return div.innerHTML;
+    }
+
+    // escapeHtml goes through textContent, which does not escape quotes — safe for
+    // element text, unsafe inside an attribute value. A session name is arbitrary text.
+    function escapeAttr(s) {
+      return escapeHtml(s).replace(/"/g, "&quot;");
     }
 
     async function poll() {
