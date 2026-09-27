@@ -239,6 +239,19 @@ class TestAllowedVoices:
         with pytest.raises(ValueError, match="Top-level 'allowed_voices' is not supported"):
             _parse_server_config()
 
+    def test_top_level_allowlist_alongside_the_mapping_form_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The flat form is not the only way to write a stray top-level key.
+
+        Guarding only the legacy parser would let this one through silently,
+        which is the same no-op wearing the mapping form.
+        """
+        config = _multi_engine_config(tmp_path)
+        config["allowed_voices"] = ["casual_female"]
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="Top-level 'allowed_voices' is not supported"):
+            _parse_server_config()
+
 
 class TestStartupValidatesAllowedVoices:
     """An allowlist entry its engine cannot synthesise must fail at startup.

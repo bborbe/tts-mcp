@@ -1584,10 +1584,6 @@ def _parse_legacy_engine(config: dict[str, object], default_voice: str) -> tuple
         ValueError: If 'engine' or 'language' has the wrong type.
         FileNotFoundError: If the model directory does not exist.
     """
-    if "allowed_voices" in config:
-        msg = "Top-level 'allowed_voices' is not supported. Declare the 'engines:' mapping and set allowed_voices under engines.<kind>."
-        raise ValueError(msg)
-
     model_path = _require(config, "model")
     if not isinstance(model_path, str) or not Path(model_path).exists():
         msg = f"Model directory does not exist: {model_path!r}"
@@ -1710,6 +1706,14 @@ def _parse_engines(config: dict[str, object], default_voice: str) -> tuple[tuple
 def _parse_server_config() -> _ServerConfig:
     """Load and validate server settings from config.yaml. Fails fast on missing keys."""
     config = load_config()
+
+    # Checked here rather than in _parse_legacy_engine so it covers BOTH forms:
+    # the flat form is not the only way to write a stray top-level key, and a
+    # config declaring `engines:` alongside one would otherwise be silently
+    # ignored — leaving the operator believing they were protected.
+    if "allowed_voices" in config:
+        msg = "Top-level 'allowed_voices' is not supported. Declare the 'engines:' mapping and set allowed_voices under engines.<kind>."
+        raise ValueError(msg)
 
     default_voice = _require(config, "default_voice")
     if not isinstance(default_voice, str):
