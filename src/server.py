@@ -36,6 +36,7 @@ from src.tts import (
     make_output_path,
     normalize_chunks,
     play_stream,
+    resolve_voice,
     restart_process_on_device_change,
     simplify_punctuation,
     start_output_device_change_watcher,
@@ -124,6 +125,8 @@ class ServerState:
         voices_by_engine: dict[str, list[str]],
         default_engine: str,
         default_voice: str,
+        engine_default_voices: dict[str, str],
+        allowed_voices_by_engine: dict[str, tuple[str, ...]],
         sample_rate: int,
         lead_silence_ms: int,
         simplify_punctuation: bool,
@@ -147,6 +150,12 @@ class ServerState:
                 from disk at startup without loading any model.
             default_engine: Engine used by requests that name none.
             default_voice: Default voice for requests without voice override.
+            engine_default_voices: Default voice per engine kind. A request that
+                names an engine but no voice takes that engine's own default —
+                the global one is not a valid voice on every engine.
+            allowed_voices_by_engine: Voices each engine permits. An engine
+                absent from the mapping, or mapped to an empty tuple, declares
+                no allowlist and keeps every voice it offers reachable.
             sample_rate: Audio sample rate in Hz.
             lead_silence_ms: Silence written after each audio stream open/reopen.
             simplify_punctuation: Whether to simplify punctuation before TTS.
@@ -165,6 +174,8 @@ class ServerState:
         self._voices_by_engine = voices_by_engine
         self._default_engine = default_engine
         self._default_voice = default_voice
+        self._engine_default_voices = engine_default_voices
+        self._allowed_voices_by_engine = allowed_voices_by_engine
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
         self._simplify_punctuation = simplify_punctuation
@@ -239,6 +250,30 @@ class ServerState:
             That engine's voices, or an empty list when it is unavailable.
         """
         return self._voices_by_engine.get(engine, [])
+
+    def engine_default_voice(self, engine: str) -> str:
+        """Return the voice one engine uses when a request names none.
+
+        Args:
+            engine: Engine kind to look up.
+
+        Returns:
+            That engine's own default voice, falling back to the global default
+            for an engine the config declared no default for.
+        """
+        return self._engine_default_voices.get(engine, self._default_voice)
+
+    def allowed_voices_for(self, engine: str) -> tuple[str, ...]:
+        """Return the voices one engine permits.
+
+        Args:
+            engine: Engine kind to look up.
+
+        Returns:
+            That engine's allowlist, or an empty tuple when it declares none —
+            an empty allowlist means unrestricted, not "allow nothing".
+        """
+        return self._allowed_voices_by_engine.get(engine, ())
 
     def mark_engine_loaded(self, engine: str) -> None:
         """Record that an engine's model is now resident.
@@ -865,7 +900,10 @@ def say(request: Request, body: SayRequest) -> SayResponse:
             detail=f"Engine '{engine}' is unavailable: {error}",
         )
 
-    voice = body.voice if body.voice else state.default_voice
+    # The one choke point every caller passes — the MCP relay, the CLI and a
+    # bare curl alike — so the allowlist is enforced here rather than in the
+    # relay, where a direct POST to this endpoint would bypass it.
+    voice = resolve_voice(body.voice, engine, state.engine_default_voice(engine), state.allowed_voices_for(engine))
     if voice not in engine_voices:
         raise HTTPException(
             status_code=400,
@@ -1461,12 +1499,15 @@ class _EngineConfig:
         model_path: Model directory for this engine.
         language: Language for the qwen3 engine; must be None for voxtral.
         default_voice: Voice used when a request names this engine but no voice.
+        allowed_voices: Voices this engine permits. Empty means no allowlist is
+            declared, so every voice the engine offers stays reachable.
     """
 
     kind: str
     model_path: str
     language: str | None
     default_voice: str
+    allowed_voices: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1558,7 +1599,7 @@ def _parse_legacy_engine(config: dict[str, object], default_voice: str) -> tuple
         msg = "'language' in config.yaml must be a string"
         raise ValueError(msg)
 
-    return (_EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=default_voice),)
+    return (_EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=default_voice, allowed_voices=()),)
 
 
 def _parse_engine_block(kind: str, block: object, default_voice: str) -> _EngineConfig:
@@ -1595,7 +1636,19 @@ def _parse_engine_block(kind: str, block: object, default_voice: str) -> _Engine
         msg = f"engines.{kind}.default_voice in config.yaml must be a string"
         raise ValueError(msg)
 
-    return _EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=voice)
+    # An omitted or empty list means this engine declares no allowlist, so every
+    # voice it offers stays reachable. Restricting is opt-in, never accidental:
+    # an allowlist that merely filters a menu pre-approves nothing.
+    allowed = settings.get("allowed_voices")
+    allowed_voices: tuple[str, ...] = ()
+    if allowed is not None:
+        entries = cast(list[object], allowed) if isinstance(allowed, list) else None
+        if entries is None or not all(isinstance(entry, str) for entry in entries):
+            msg = f"engines.{kind}.allowed_voices in config.yaml must be a list of strings"
+            raise ValueError(msg)
+        allowed_voices = tuple(cast(str, entry) for entry in entries)
+
+    return _EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=voice, allowed_voices=allowed_voices)
 
 
 def _parse_engines(config: dict[str, object], default_voice: str) -> tuple[tuple[_EngineConfig, ...], str]:
@@ -1653,6 +1706,14 @@ def _parse_engines(config: dict[str, object], default_voice: str) -> tuple[tuple
 def _parse_server_config() -> _ServerConfig:
     """Load and validate server settings from config.yaml. Fails fast on missing keys."""
     config = load_config()
+
+    # Checked here rather than in _parse_legacy_engine so it covers BOTH forms:
+    # the flat form is not the only way to write a stray top-level key, and a
+    # config declaring `engines:` alongside one would otherwise be silently
+    # ignored — leaving the operator believing they were protected.
+    if "allowed_voices" in config:
+        msg = "Top-level 'allowed_voices' is not supported. Declare the 'engines:' mapping and set allowed_voices under engines.<kind>."
+        raise ValueError(msg)
 
     default_voice = _require(config, "default_voice")
     if not isinstance(default_voice, str):
@@ -1739,9 +1800,22 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
 
     for engine_cfg in cfg.engines:
         engine_voices = voices_by_engine.get(engine_cfg.kind)
-        if engine_voices is not None and engine_cfg.default_voice not in engine_voices:
+        if engine_voices is None:
+            continue
+        if engine_cfg.default_voice not in engine_voices:
             msg = (
                 f"default_voice '{engine_cfg.default_voice}' for engine '{engine_cfg.kind}' not found. "
+                f"Available: {', '.join(engine_voices)}"
+            )
+            raise ValueError(msg)
+        # An allowlist entry the engine cannot synthesise would be a silent
+        # no-op at request time — the substitution would pick a voice that does
+        # not exist and the caller would get a 400 from a config that looked
+        # valid. Fail at startup instead.
+        unknown_allowed = [voice for voice in engine_cfg.allowed_voices if voice not in engine_voices]
+        if unknown_allowed:
+            msg = (
+                f"allowed_voices {', '.join(unknown_allowed)} for engine '{engine_cfg.kind}' not found. "
                 f"Available: {', '.join(engine_voices)}"
             )
             raise ValueError(msg)
@@ -1762,6 +1836,8 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         voices_by_engine=voices_by_engine,
         default_engine=cfg.default_engine,
         default_voice=cfg.default_voice,
+        engine_default_voices={engine_cfg.kind: engine_cfg.default_voice for engine_cfg in cfg.engines},
+        allowed_voices_by_engine={engine_cfg.kind: engine_cfg.allowed_voices for engine_cfg in cfg.engines},
         sample_rate=cfg.sample_rate,
         lead_silence_ms=cfg.lead_silence_ms,
         simplify_punctuation=cfg.simplify_punctuation,

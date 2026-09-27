@@ -47,6 +47,9 @@ from src.tts.text import (
     clean_text,
     simplify_punctuation,
 )
+from src.tts.voices import (
+    resolve_voice,
+)
 from src.tts.worker import (
     AudioSettings,
     audio_worker,
@@ -90,6 +93,7 @@ __all__ = [
     "play_chunks",
     "play_stream",
     "resolve_config_path",
+    "resolve_voice",
     "restart_process_on_device_change",
     "save_audio",
     "simplify_punctuation",

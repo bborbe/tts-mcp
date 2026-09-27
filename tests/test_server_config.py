@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from src.server import _parse_server_config
+from src.server import _build_server_state, _parse_server_config
 from src.tts import QWEN3, VOXTRAL
 
 
@@ -179,3 +179,108 @@ class TestSampleRateGuard:
 
         with pytest.raises(ValueError, match="Per-engine sample rates are not supported"):
             _parse_server_config()
+
+
+class TestAllowedVoices:
+    """allowed_voices is declared per engine and restricting is opt-in."""
+
+    def test_absent_allowlist_leaves_the_engine_unrestricted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.server.load_config", lambda: _multi_engine_config(tmp_path))
+
+        cfg = _parse_server_config()
+
+        by_kind = {engine.kind: engine for engine in cfg.engines}
+        assert by_kind[QWEN3].allowed_voices == ()
+        assert by_kind[VOXTRAL].allowed_voices == ()
+
+    def test_empty_allowlist_means_unrestricted_not_allow_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _multi_engine_config(tmp_path)
+        config["engines"][QWEN3]["allowed_voices"] = []
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        cfg = _parse_server_config()
+
+        assert cfg.engines[0].allowed_voices == ()
+
+    def test_parses_the_per_engine_allowlist(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _multi_engine_config(tmp_path)
+        config["engines"][QWEN3]["allowed_voices"] = ["casual_female"]
+        config["engines"][VOXTRAL]["allowed_voices"] = ["casual_male"]
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        cfg = _parse_server_config()
+
+        by_kind = {engine.kind: engine for engine in cfg.engines}
+        assert by_kind[QWEN3].allowed_voices == ("casual_female",)
+        assert by_kind[VOXTRAL].allowed_voices == ("casual_male",)
+
+    def test_non_list_allowlist_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _multi_engine_config(tmp_path)
+        config["engines"][QWEN3]["allowed_voices"] = "casual_female"
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="engines.qwen3.allowed_voices"):
+            _parse_server_config()
+
+    def test_non_string_entry_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _multi_engine_config(tmp_path)
+        config["engines"][QWEN3]["allowed_voices"] = ["casual_female", 7]
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="engines.qwen3.allowed_voices"):
+            _parse_server_config()
+
+    def test_top_level_allowlist_in_the_flat_form_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Silently ignoring it would leave the operator believing they were protected."""
+        config = _base_config(tmp_path)
+        config["allowed_voices"] = ["casual_female"]
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="Top-level 'allowed_voices' is not supported"):
+            _parse_server_config()
+
+    def test_top_level_allowlist_alongside_the_mapping_form_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The flat form is not the only way to write a stray top-level key.
+
+        Guarding only the legacy parser would let this one through silently,
+        which is the same no-op wearing the mapping form.
+        """
+        config = _multi_engine_config(tmp_path)
+        config["allowed_voices"] = ["casual_female"]
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="Top-level 'allowed_voices' is not supported"):
+            _parse_server_config()
+
+
+class TestStartupValidatesAllowedVoices:
+    """An allowlist entry its engine cannot synthesise must fail at startup.
+
+    At request time the substitution would pick a voice that does not exist and
+    the caller would get a 400 from a config that looked valid — a silent no-op
+    the operator would only discover from a failed utterance.
+    """
+
+    _DISCOVERED = {QWEN3: ["casual_female"], VOXTRAL: ["casual_female", "casual_male"]}
+
+    def _config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: list[str]) -> Any:
+        config = _multi_engine_config(tmp_path)
+        config["engines"][QWEN3]["allowed_voices"] = allowed
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+        monkeypatch.setattr("src.server._discover_engine_voices", lambda _cfg: (dict(self._DISCOVERED), {}))
+        return _parse_server_config()
+
+    def test_unknown_allowed_voice_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = self._config(tmp_path, monkeypatch, ["casual_female", "nonexistent"])
+
+        with pytest.raises(ValueError, match="allowed_voices nonexistent for engine 'qwen3'"):
+            _build_server_state(cfg)
+
+    def test_known_allowed_voices_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        cfg = self._config(tmp_path, monkeypatch, ["casual_female"])
+
+        state = _build_server_state(cfg)
+
+        assert state.allowed_voices_for(QWEN3) == ("casual_female",)
+        assert state.allowed_voices_for(VOXTRAL) == ()
+        assert state.engine_default_voice(VOXTRAL) == "casual_female"
