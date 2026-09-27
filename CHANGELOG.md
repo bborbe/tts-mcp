@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.18.1
 
 - fix: **`GET /status/{message_id}` now reports the voice actually used.** `StatusResponse` declared a `voice` field the handler never populated, so it always came back `null` — including through the MCP `get_status` tool, which relays to this endpoint. `GET /state` was unaffected, since its `to_response` helper did pass the field, which is why the gap stayed invisible. Surfaced while verifying v0.18.0's `allowed_voices` substitution: the allowlist worked and `GET /state` showed the substituted voice, but `get_status` reported nothing — leaving a caller unable to see what was actually spoken, and the substitution observable only in the server log.
 
