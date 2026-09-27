@@ -59,6 +59,8 @@ def _make_state(
     registry: EngineRegistry | None = None,
     voices_by_engine: dict[str, list[str]] | None = None,
     default_engine: str = VOXTRAL,
+    engine_default_voices: dict[str, str] | None = None,
+    allowed_voices_by_engine: dict[str, tuple[str, ...]] | None = None,
 ) -> ServerState:
     """Create a ServerState for testing.
 
@@ -78,11 +80,17 @@ def _make_state(
         registry.preload(default_engine, LoadedEngine(engine=VoxtralEngine(), model=MagicMock()))
     if meter is None:
         meter = pyln.Meter(float(sample_rate))
+    if engine_default_voices is None:
+        engine_default_voices = {default_engine: default_voice}
+    if allowed_voices_by_engine is None:
+        allowed_voices_by_engine = {}
     state = ServerState(
         registry=registry,
         voices_by_engine=voices_by_engine,
         default_engine=default_engine,
         default_voice=default_voice,
+        engine_default_voices=engine_default_voices,
+        allowed_voices_by_engine=allowed_voices_by_engine,
         sample_rate=sample_rate,
         lead_silence_ms=lead_silence_ms,
         simplify_punctuation=simplify_punctuation,
@@ -228,6 +236,7 @@ def _multi_engine_state(
     loader: Any = None,
     preload_default: bool = True,
     stream: bool = False,
+    allowed_voices_by_engine: dict[str, tuple[str, ...]] | None = None,
 ) -> ServerState:
     """State declaring both engines, with only the default preloaded."""
     specs = {
@@ -244,6 +253,8 @@ def _multi_engine_state(
         },
         default_engine=VOXTRAL,
         default_voice="casual_female",
+        engine_default_voices={VOXTRAL: "casual_female", QWEN3: "ryan"},
+        allowed_voices_by_engine=allowed_voices_by_engine,
         stream=stream,
     )
 
@@ -302,6 +313,71 @@ class TestMultiEngineVoices:
         assert engines[QWEN3]["available"] is False
         assert engines[QWEN3]["error"] == "model directory missing"
         assert "ryan" not in client.get("/voices").json()["voices"]
+
+
+class TestSayVoiceAllowlist:
+    """allowed_voices restricts which voices reach playback on POST /say."""
+
+    def test_allowed_voice_is_synthesised_unchanged(self) -> None:
+        state = _multi_engine_state(allowed_voices_by_engine={VOXTRAL: ("casual_female", "casual_male")})
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "casual_male"})
+
+        assert response.status_code == 202
+        assert state.work_queue.get_nowait().voice == "casual_male"
+
+    def test_disallowed_voice_falls_back_to_the_first_allowed(self) -> None:
+        state = _multi_engine_state(allowed_voices_by_engine={VOXTRAL: ("casual_male",)})
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "casual_female"})
+
+        assert response.status_code == 202
+        assert state.work_queue.get_nowait().voice == "casual_male"
+
+    def test_status_reports_the_substituted_voice(self) -> None:
+        state = _multi_engine_state(allowed_voices_by_engine={VOXTRAL: ("casual_male",)})
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "casual_female"})
+
+        msg_id = response.json()["message_id"]
+        with state.status_lock:
+            assert state.statuses[msg_id].voice == "casual_male"
+
+    def test_engine_without_an_allowlist_stays_unrestricted(self) -> None:
+        state = _multi_engine_state(allowed_voices_by_engine={QWEN3: ("ryan",)})
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "casual_female"})
+
+        assert response.status_code == 202
+        assert state.work_queue.get_nowait().voice == "casual_female"
+
+    def test_allowlist_is_per_engine(self) -> None:
+        """A voice allowed on one engine must not become reachable on the other."""
+        state = _multi_engine_state(allowed_voices_by_engine={QWEN3: ("ryan",), VOXTRAL: ("casual_male",)})
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "ryan", "engine": VOXTRAL})
+
+        assert response.status_code == 202
+        assert state.work_queue.get_nowait().voice == "casual_male"
+
+    def test_engine_default_is_per_engine_not_global(self) -> None:
+        """Regression: the global default was used, so naming a non-default engine
+        with no voice 400'd whenever the two engines' voice sets differed.
+        """
+        state = _multi_engine_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "engine": QWEN3})
+
+        assert response.status_code == 202
+        item = state.work_queue.get_nowait()
+        assert item.engine == QWEN3
+        assert item.voice == "ryan"
 
 
 class TestSayEngineSelection:

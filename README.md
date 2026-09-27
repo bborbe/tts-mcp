@@ -188,6 +188,7 @@ port: 12000
 | `models_dir` | Base directory containing model subdirectories (for CLI model selection) |
 | `sample_rate` | Audio sample rate in Hz (24000 for Voxtral) |
 | `default_voice` | Default voice for server requests without a voice override |
+| `allowed_voices` | Per-engine (`engines.<kind>.allowed_voices`) list of voices this engine permits. Omit it, or leave it empty, to keep every voice the engine offers reachable. See [Restricting which voices are reachable](#restricting-which-voices-are-reachable) |
 | `save_wav` | Save generated audio to WAV files in `data/output/` (`true` or `false`) |
 | `simplify_punctuation` | Strip commas, replace other marks with periods for cleaner speech |
 | `stream` | Stream playback within each utterance for low latency (`true` or `false`) — see below |
@@ -212,9 +213,11 @@ engines:
     model: /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
     language: German
     default_voice: ryan
+    allowed_voices: [ryan]
   voxtral:
     model: /path/to/Voxtral-4B-TTS-2603-mlx-6bit
     default_voice: casual_male
+    allowed_voices: [casual_male]
 sample_rate: 24000   # global — every engine must agree
 # ... remaining audio keys unchanged
 ```
@@ -242,6 +245,49 @@ Consequences worth knowing:
 
 The flat single-engine form keeps working unchanged — declaring both forms at once is an error rather than one
 silently winning.
+
+### Restricting which voices are reachable
+
+Every voice an engine can synthesise is reachable by default. To pin an engine to the voices you actually want,
+declare `allowed_voices` in its block:
+
+```yaml
+engines:
+  qwen3:
+    model: /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
+    language: English
+    default_voice: ryan
+    allowed_voices: [ryan]
+  voxtral:
+    model: /path/to/Voxtral-4B-TTS-2603-mlx-6bit
+    default_voice: casual_male
+    allowed_voices: [casual_male]
+```
+
+A request naming a voice **outside** the list is not rejected — it is synthesised with the list's first entry, and the
+substitution is logged at error level. `GET /state` and `GET /status` report the voice actually used, so a caller can
+always see what was spoken. A request naming an allowed voice is synthesised unchanged.
+
+The list is per engine because voice names are: `ryan` exists only on `qwen3`, `casual_male` only on `voxtral`. Naming
+`ryan` on `voxtral` is a different voice, not a shorter spelling of one.
+
+Notes:
+
+- **Omitting the key is not a denial.** An engine with no `allowed_voices` keeps every voice it offers reachable, so
+  existing configs behave exactly as before. An empty list (`allowed_voices: []`) means the same thing — restricting is
+  always opt-in.
+- **An entry the engine cannot synthesise fails at startup**, not at request time — otherwise the substitution would
+  pick a voice that does not exist and the caller would get a 400 from a config that looked valid.
+- **The list is enforced server-side, at `POST /say`** — the one choke point the MCP relay, the CLI and a bare `curl`
+  all pass through. Guarding the MCP relay alone would leave a direct POST unrestricted.
+- **Changes need a restart.** The list is read once at startup; there is no hot reload.
+- **A top-level `allowed_voices` is rejected** — the key is per engine, so the flat `engine:`/`model:` form cannot carry
+  one. Declaring it there is an error rather than a silently ignored key.
+
+This substitution is a deliberate, scoped carve-out from this repo's *"fail fast — never swallow errors / never silently
+fall back to a default"* rule (`CLAUDE.md`). It is not silent — every substitution is logged — and everything else on the
+`/say` path still fails fast: an unknown engine, an unavailable engine, and a voice belonging to no engine all keep
+raising 400.
 
 ### Streaming playback
 
