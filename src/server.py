@@ -1088,6 +1088,7 @@ def status(request: Request, message_id: str) -> StatusResponse:
         error=ms.error,
         engine=ms.engine,
         sender=ms.sender,
+        voice=ms.voice,
     )
 
 
