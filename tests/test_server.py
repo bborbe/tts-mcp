@@ -346,6 +346,31 @@ class TestSayVoiceAllowlist:
         with state.status_lock:
             assert state.statuses[msg_id].voice == "casual_male"
 
+    def test_status_endpoint_reports_the_substituted_voice(self) -> None:
+        """Read through HTTP, not the state dict.
+
+        The MCP `get_status` tool relays to GET /status, and `StatusResponse`
+        declared a `voice` field the handler never populated — so a caller could
+        not see which voice was actually spoken. Asserting on `state.statuses`
+        passes either way and hid that.
+        """
+        state = _multi_engine_state(allowed_voices_by_engine={VOXTRAL: ("casual_male",)})
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "casual_female"})
+        msg_id = response.json()["message_id"]
+
+        assert client.get(f"/status/{msg_id}").json()["voice"] == "casual_male"
+
+    def test_status_endpoint_reports_an_allowed_voice(self) -> None:
+        state = _multi_engine_state()
+        client = TestClient(_make_app(state))
+
+        response = client.post("/say", json={"text": "Hello", "voice": "casual_male"})
+        msg_id = response.json()["message_id"]
+
+        assert client.get(f"/status/{msg_id}").json()["voice"] == "casual_male"
+
     def test_engine_without_an_allowlist_stays_unrestricted(self) -> None:
         state = _multi_engine_state(allowed_voices_by_engine={QWEN3: ("ryan",)})
         client = TestClient(_make_app(state))
