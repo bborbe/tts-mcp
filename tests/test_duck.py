@@ -1,5 +1,6 @@
 """Tests for ducking other applications' audio around each utterance."""
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -89,7 +90,7 @@ class TestSocketDucker:
             self._ducker().duck()
 
         sock.connect.assert_called_once_with("/tmp/x.sock")
-        sock.sendall.assert_called_once_with(b"duck 0.25")
+        sock.sendall.assert_called_once_with(f"duck 0.25 {os.getpid()}".encode())
 
     def test_unduck_sends_the_command(self) -> None:
         with patch("src.tts.duck.socket.socket") as mock_socket:

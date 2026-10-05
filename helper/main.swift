@@ -15,7 +15,9 @@
 // so if this helper dies, audio returns by itself rather than being stranded.
 //
 // Protocol (newline-delimited over a unix socket):
-//   duck <level>   ramp other audio down to <level> (0.0-1.0) and keep reading
+//   duck <level> [pid ...]
+//                  ramp other audio down to <level> (0.0-1.0) and keep reading;
+//                  the listed pids (the TTS server) and this helper keep full volume
 //   unduck         ramp back to 1.0, then stop reading
 //   status         reply with one line of state
 //   quit           tear down and exit
@@ -32,6 +34,11 @@ import Foundation
 nonisolated(unsafe) var targetGain: Float = 1.0
 nonisolated(unsafe) var currentGain: Float = 1.0
 nonisolated(unsafe) var rampStepPerSample: Float = 1.0
+
+// Level meters, for telling "the tap gave us silence" apart from "we rendered
+// audio that never reached the device". Both look identical from the outside.
+nonisolated(unsafe) var inputLevel: Float = 0
+nonisolated(unsafe) var outputLevel: Float = 0
 
 func log(_ message: String) {
     FileHandle.standardError.write(("ttsduck: " + message + "\n").data(using: .utf8)!)
@@ -70,6 +77,48 @@ func deviceUID(_ device: AudioDeviceID) -> String? {
     return s as String
 }
 
+/// The CoreAudio process object for a pid, or nil if the process has none
+/// (it has never touched audio) — a tap can only exclude process objects.
+func processObject(for pid: pid_t) -> AudioObjectID? {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var qualifier = pid
+    var object = AudioObjectID(kAudioObjectUnknown)
+    var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    let st = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &addr,
+        UInt32(MemoryLayout<pid_t>.size), &qualifier, &size, &object)
+    guard st == noErr, object != kAudioObjectUnknown else { return nil }
+    return object
+}
+
+/// Total channel count on one scope of a device, or -1 if it cannot be read.
+///
+/// The decisive check for "we render audio nobody hears": an aggregate whose
+/// output scope reports 0 channels has nowhere to send what the IOProc writes,
+/// and the IOProc still runs and still reports sane levels.
+func streamChannelCount(_ device: AudioDeviceID, scope: AudioObjectPropertyScope) -> Int {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamConfiguration,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(device, &addr, 0, nil, &size) == noErr, size > 0 else {
+        return -1
+    }
+    let raw = UnsafeMutableRawPointer.allocate(
+        byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+    defer { raw.deallocate() }
+    guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, raw) == noErr else {
+        return -1
+    }
+    let list = UnsafeMutableAudioBufferListPointer(
+        raw.assumingMemoryBound(to: AudioBufferList.self))
+    return list.reduce(0) { $0 + Int($1.mNumberChannels) }
+}
+
 func nominalSampleRate(_ device: AudioDeviceID) -> Double {
     var addr = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyNominalSampleRate,
@@ -92,6 +141,7 @@ final class DuckEngine {
     private var aggregateID = AudioObjectID(0)
     private var procID: AudioDeviceIOProcID?
     private var masterUID: String?
+    private var excludedObjects: [AudioObjectID] = []
     private var reading = false
 
     let fadeMilliseconds: Int
@@ -100,22 +150,28 @@ final class DuckEngine {
         self.fadeMilliseconds = fadeMilliseconds
     }
 
-    /// Rebuilds the tap if the default output device changed underneath us.
-    /// Cheaper and less failure-prone than a background watcher, and a USB
-    /// audio device coming and going is exactly when this matters.
-    private func rebuildIfDeviceChanged() {
+    /// Rebuilds the tap if the default output device or the exclusion set
+    /// changed underneath us. Cheaper and less failure-prone than a background
+    /// watcher: a USB device coming and going, or the TTS server restarting
+    /// under a new pid, is exactly when this matters.
+    private func rebuildIfNeeded(excluding objects: [AudioObjectID]) {
         guard let device = defaultOutputDevice(), let uid = deviceUID(device) else {
             log("no default output device")
             return
         }
-        if uid == masterUID && aggregateID != 0 { return }
-        log("output device is \(uid) — building tap")
+        let wanted = objects.sorted()
+        if uid == masterUID && aggregateID != 0 && wanted == excludedObjects { return }
+        log("output device is \(uid), excluding process objects \(wanted) — building tap")
         teardown()
-        build(device: device, uid: uid)
+        build(device: device, uid: uid, excluding: wanted)
     }
 
-    private func build(device: AudioDeviceID, uid: String) {
-        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [AudioObjectID]())
+    private func build(device: AudioDeviceID, uid: String, excluding objects: [AudioObjectID]) {
+        // The exclusion list is the whole point. A global tap that excludes
+        // nothing also taps *this* helper, so mutedWhenTapped silences the very
+        // audio we re-render — the music vanishes instead of ducking — and it
+        // taps the TTS voice too, ducking the thing that should stay loud.
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: objects)
         desc.name = "ttsduck"
         // mutedWhenTapped, never .muted: .muted silences the source whether or
         // not we are reading, so a helper that died while ducking would leave
@@ -155,6 +211,9 @@ final class DuckEngine {
             let step = rampStepPerSample
             var gain = currentGain
             let target = targetGain
+            var inSum: Float = 0
+            var outSum: Float = 0
+            var samples = 0
             for i in 0..<min(inList.count, outList.count) {
                 guard let src = inList[i].mData, let dst = outList[i].mData else { continue }
                 let count = Int(min(inList[i].mDataByteSize, outList[i].mDataByteSize)) / 4
@@ -163,13 +222,22 @@ final class DuckEngine {
                 for j in 0..<count {
                     if gain < target { gain = min(target, gain + step) }
                     else if gain > target { gain = max(target, gain - step) }
-                    d[j] = s[j] * gain
+                    let out = s[j] * gain
+                    d[j] = out
+                    inSum += s[j] * s[j]
+                    outSum += out * out
                 }
+                samples += count
             }
             currentGain = gain
+            if samples > 0 {
+                inputLevel = (inSum / Float(samples)).squareRoot()
+                outputLevel = (outSum / Float(samples)).squareRoot()
+            }
         }
         guard ioStatus == noErr else { fail("create ioproc status=\(ioStatus)") }
         masterUID = uid
+        excludedObjects = objects
     }
 
     private func startReading() {
@@ -185,8 +253,18 @@ final class DuckEngine {
         reading = false
     }
 
-    func duck(to level: Float) {
-        rebuildIfDeviceChanged()
+    /// - Parameter pids: processes that must keep full volume (the TTS server).
+    ///   This helper's own pid is always added.
+    func duck(to level: Float, sparing pids: [pid_t]) {
+        var objects: [AudioObjectID] = []
+        for pid in pids + [getpid()] {
+            if let object = processObject(for: pid) {
+                objects.append(object)
+            } else {
+                log("pid \(pid) has no audio process object — it cannot be excluded")
+            }
+        }
+        rebuildIfNeeded(excluding: objects)
         // Start reading *before* touching the gain: the tap mutes the original
         // only while it is being read, so reading at the current gain keeps the
         // handover level-continuous instead of dipping.
@@ -218,13 +296,21 @@ final class DuckEngine {
             tapID = 0
         }
         masterUID = nil
+        excludedObjects = []
         currentGain = 1.0
         targetGain = 1.0
+        inputLevel = 0
+        outputLevel = 0
     }
 
     var statusLine: String {
         "reading=\(reading ? 1 : 0) gain=\(String(format: "%.3f", currentGain)) "
-            + "target=\(String(format: "%.3f", targetGain)) device=\(masterUID ?? "none")"
+            + "target=\(String(format: "%.3f", targetGain)) "
+            + "in=\(String(format: "%.4f", inputLevel)) out=\(String(format: "%.4f", outputLevel)) "
+            + "aggIn=\(aggregateID == 0 ? -1 : streamChannelCount(aggregateID, scope: kAudioObjectPropertyScopeInput)) "
+            + "aggOut=\(aggregateID == 0 ? -1 : streamChannelCount(aggregateID, scope: kAudioObjectPropertyScopeOutput)) "
+            + "excluded=\(excludedObjects.map(String.init).joined(separator: ",")) "
+            + "device=\(masterUID ?? "none")"
     }
 }
 
@@ -277,13 +363,14 @@ while true {
     if read > 0 {
         let command = String(decoding: buffer[0..<read], as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let parts = command.split(separator: " ", maxSplits: 1)
+        let parts = command.split(separator: " ")
         var reply = "ok"
 
         switch parts.first.map(String.init) ?? "" {
         case "duck":
             let level = parts.count > 1 ? (Float(parts[1]) ?? 0.25) : 0.25
-            engine.duck(to: level)
+            let pids = parts.dropFirst(2).compactMap { pid_t($0) }
+            engine.duck(to: level, sparing: pids)
         case "unduck":
             engine.unduck()
         case "status":

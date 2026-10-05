@@ -12,6 +12,7 @@ is stale, playback proceeds unducked: a missing convenience must never stop the
 voice.
 """
 
+import os
 import socket
 import sys
 from dataclasses import dataclass
@@ -87,8 +88,12 @@ class SocketDucker:
         self._warned = False
 
     def duck(self) -> None:
-        """Ask the helper to ramp other audio down."""
-        self._send(f"duck {self._config.level}")
+        """Ask the helper to ramp other audio down, sparing this process.
+
+        The pid matters: the helper's tap is global, so without it the voice
+        itself would be tapped and ducked along with the music.
+        """
+        self._send(f"duck {self._config.level} {os.getpid()}")
 
     def unduck(self) -> None:
         """Ask the helper to ramp other audio back up."""
