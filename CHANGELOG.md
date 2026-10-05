@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.20.0
 
 - feat: **back-to-back messages keep the music ducked instead of letting it rise between sentences.** The client now defers the release by a new required `duck.hold_ms` (default `1000` in `config.yaml`, max `60000`): `unduck` only schedules it, and a `duck` inside the window cancels it. With `stream: true` the next message spends a few seconds generating before it plays, and v0.19.0 brought the music back up in that gap. The playback thread no longer waits on the fade-up either, so a slow release no longer adds silence between messages. **Configs with `duck.enabled: true` must add `hold_ms`**, or the server refuses to start.
 - feat: **separate attack and release fades.** `duck.fade_ms` is replaced by `fade_down_ms` (attack, default `100`) and `fade_up_ms` (release, default `500`): the music drops fast so the voice's first words are clear, then returns gently. Picked by ear against three variants (0 / 150 / 500 ms). **Configs with `duck.enabled: true` must rename `fade_ms`** to the two new keys; the helper protocol is now `duck <level> <fade_down_ms> <fade_up_ms> [pid ...]`.
