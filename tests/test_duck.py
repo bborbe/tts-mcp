@@ -17,29 +17,38 @@ from src.tts.duck import (
 
 class TestDuckConfig:
     def test_accepts_valid_level_and_fade(self) -> None:
-        config = DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=150)
+        config = DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=150, hold_ms=0)
         assert config.level == 0.25
-        assert config.fade_ms == 150
+        assert config.fade_down_ms == 100
+        assert config.fade_up_ms == 150
 
     def test_accepts_the_extremes(self) -> None:
-        assert DuckConfig(socket_path="/tmp/x.sock", level=0.0, fade_ms=0).level == 0.0
-        assert DuckConfig(socket_path="/tmp/x.sock", level=1.0, fade_ms=0).level == 1.0
+        assert DuckConfig(socket_path="/tmp/x.sock", level=0.0, fade_down_ms=100, fade_up_ms=0, hold_ms=0).level == 0.0
+        assert DuckConfig(socket_path="/tmp/x.sock", level=1.0, fade_down_ms=100, fade_up_ms=0, hold_ms=0).level == 1.0
 
     def test_rejects_level_above_one(self) -> None:
         with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-            DuckConfig(socket_path="/tmp/x.sock", level=1.5, fade_ms=150)
+            DuckConfig(socket_path="/tmp/x.sock", level=1.5, fade_down_ms=100, fade_up_ms=150, hold_ms=0)
 
     def test_rejects_negative_level(self) -> None:
         with pytest.raises(ValueError, match="between 0.0 and 1.0"):
-            DuckConfig(socket_path="/tmp/x.sock", level=-0.1, fade_ms=150)
+            DuckConfig(socket_path="/tmp/x.sock", level=-0.1, fade_down_ms=100, fade_up_ms=150, hold_ms=0)
 
     def test_rejects_negative_fade(self) -> None:
-        with pytest.raises(ValueError, match="fade_ms must be between 0 and 5000"):
-            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=-1)
+        with pytest.raises(ValueError, match="fade_up_ms must be between 0 and 5000"):
+            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=-1, hold_ms=0)
+
+    def test_rejects_hold_outside_its_range(self) -> None:
+        with pytest.raises(ValueError, match="hold_ms must be between 0 and 60000"):
+            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=150, hold_ms=60001)
+
+    def test_rejects_attack_fade_out_of_range(self) -> None:
+        with pytest.raises(ValueError, match="fade_down_ms must be between 0 and 5000"):
+            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=-1, fade_up_ms=150, hold_ms=0)
 
     def test_rejects_fade_above_the_helper_cap(self) -> None:
-        with pytest.raises(ValueError, match="fade_ms must be between 0 and 5000"):
-            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=5001)
+        with pytest.raises(ValueError, match="fade_up_ms must be between 0 and 5000"):
+            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=5001, hold_ms=0)
 
 
 class TestDuckerFromConfig:
@@ -58,15 +67,15 @@ class TestDuckerFromConfig:
             ducker_from_config({"duck": {"enabled": "true"}})
 
     def test_enabled_but_incomplete_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="missing level, fade_ms"):
+        with pytest.raises(ValueError, match="missing level, fade_down_ms, fade_up_ms, hold_ms"):
             ducker_from_config({"duck": {"enabled": True, "socket": "/tmp/x.sock"}})
 
     def test_enabled_builds_socket_ducker(self) -> None:
-        config = {"duck": {"enabled": True, "socket": "/tmp/x.sock", "level": 0.25, "fade_ms": 150}}
+        config = {"duck": {"enabled": True, "socket": "/tmp/x.sock", "level": 0.25, "fade_down_ms": 100, "fade_up_ms": 500, "hold_ms": 0}}
         assert isinstance(ducker_from_config(config), SocketDucker)
 
     def test_tilde_in_socket_path_is_expanded(self) -> None:
-        config = {"duck": {"enabled": True, "socket": "~/duck.sock", "level": 0.25, "fade_ms": 150}}
+        config = {"duck": {"enabled": True, "socket": "~/duck.sock", "level": 0.25, "fade_down_ms": 100, "fade_up_ms": 500, "hold_ms": 0}}
         ducker = ducker_from_config(config)
         assert isinstance(ducker, SocketDucker)
 
@@ -88,7 +97,7 @@ class TestNullDucker:
 
 class TestSocketDucker:
     def _ducker(self) -> SocketDucker:
-        return SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=150))
+        return SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=150, hold_ms=0))
 
     def test_duck_sends_the_level(self) -> None:
         with patch("src.tts.duck.socket.socket") as mock_socket:
@@ -96,21 +105,75 @@ class TestSocketDucker:
             self._ducker().duck()
 
         sock.connect.assert_called_once_with("/tmp/x.sock")
-        sock.sendall.assert_called_once_with(f"duck 0.25 150 {os.getpid()}".encode())
+        sock.sendall.assert_called_once_with(f"duck 0.25 100 150 {os.getpid()}".encode())
 
-    def test_unduck_sends_the_command(self) -> None:
+    @staticmethod
+    def _wait_for_release(ducker: SocketDucker) -> None:
+        timer = ducker._release
+        assert timer is not None
+        timer.join(timeout=5)
+
+    def test_unduck_sends_the_command_after_the_hold(self) -> None:
+        ducker = self._ducker()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck()
+            self._wait_for_release(ducker)
+
+        assert sock.sendall.call_args_list[-1].args == (b"unduck",)
+        assert sock.sendall.call_count == 2
+
+    def test_unduck_without_a_duck_sends_nothing(self) -> None:
         with patch("src.tts.duck.socket.socket") as mock_socket:
             sock = mock_socket.return_value.__enter__.return_value
             self._ducker().unduck()
 
-        sock.sendall.assert_called_once_with(b"unduck")
+        sock.sendall.assert_not_called()
 
-    def test_timeout_scales_with_the_fade(self) -> None:
-        # unduck blocks in the helper for the fade duration, so a short timeout
-        # would report a false failure on a slow ramp.
+    def test_back_to_back_utterances_keep_the_duck(self) -> None:
+        # The second duck lands inside the hold window, so the music never
+        # pumps up between sentences: one duck sent, no unduck at all.
+        ducker = SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=150, hold_ms=60000))
         with patch("src.tts.duck.socket.socket") as mock_socket:
             sock = mock_socket.return_value.__enter__.return_value
-            SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=500)).unduck()
+            ducker.duck()
+            ducker.unduck()
+            ducker.duck()
+            ducker.unduck()
+            ducker.duck()
+
+        assert sock.sendall.call_count == 1
+        assert ducker._release is None
+
+    def test_ducks_again_after_the_release(self) -> None:
+        ducker = self._ducker()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck()
+            self._wait_for_release(ducker)
+            ducker.duck()
+
+        sent = [call.args[0] for call in sock.sendall.call_args_list]
+        assert sent == [f"duck 0.25 100 150 {os.getpid()}".encode(), b"unduck", f"duck 0.25 100 150 {os.getpid()}".encode()]
+
+    def test_failed_duck_is_retried_on_the_next_utterance(self) -> None:
+        # A duck that never reached the helper must not be remembered as held.
+        ducker = self._ducker()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            sock.connect.side_effect = [FileNotFoundError("gone"), None]
+            ducker.duck()
+            ducker.unduck()
+            ducker.duck()
+
+        assert sock.sendall.call_count == 1
+
+    def test_timeout_scales_with_the_fade(self) -> None:
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=500, hold_ms=0)).duck()
 
         sock.settimeout.assert_called_once_with(2.5)
 

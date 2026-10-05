@@ -15,12 +15,16 @@ voice.
 import os
 import socket
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
 MAX_FADE_MS = 5000
 """Longest ramp the helper accepts; it clamps to the same bound."""
+
+MAX_HOLD_MS = 60000
+"""Longest the duck may outlive the last utterance before releasing."""
 
 
 @dataclass(frozen=True)
@@ -30,25 +34,37 @@ class DuckConfig:
     Attributes:
         socket_path: Unix socket the TTSDuck helper listens on.
         level: Gain applied to other apps while speaking, 0.0-1.0.
-        fade_ms: Ramp duration in each direction, in milliseconds. Sent to the
-            helper with every duck, so this value is what shapes the ramp.
+        fade_down_ms: Attack — how fast other audio drops when speech starts.
+            Keep it short so the voice's first words are clear.
+        fade_up_ms: Release — how gently other audio returns afterwards.
+            Both fades travel with every duck, so these values shape the ramp.
+        hold_ms: How long the duck outlives an utterance. A new utterance
+            inside this window keeps the music down instead of letting it pump
+            up and back between sentences.
     """
 
     socket_path: str
     level: float
-    fade_ms: int
+    fade_down_ms: int
+    fade_up_ms: int
+    hold_ms: int
 
     def __post_init__(self) -> None:
-        """Validate the level and fade range.
+        """Validate the level, fade and hold ranges.
 
         Raises:
-            ValueError: If level is outside 0.0-1.0 or fade_ms is negative.
+            ValueError: If level is outside 0.0-1.0 or a fade or hold is outside
+                its range.
         """
         if not 0.0 <= self.level <= 1.0:
             msg = f"duck level must be between 0.0 and 1.0, got {self.level}"
             raise ValueError(msg)
-        if not 0 <= self.fade_ms <= MAX_FADE_MS:
-            msg = f"duck fade_ms must be between 0 and {MAX_FADE_MS}, got {self.fade_ms}"
+        for name, value in (("fade_down_ms", self.fade_down_ms), ("fade_up_ms", self.fade_up_ms)):
+            if not 0 <= value <= MAX_FADE_MS:
+                msg = f"duck {name} must be between 0 and {MAX_FADE_MS}, got {value}"
+                raise ValueError(msg)
+        if not 0 <= self.hold_ms <= MAX_HOLD_MS:
+            msg = f"duck hold_ms must be between 0 and {MAX_HOLD_MS}, got {self.hold_ms}"
             raise ValueError(msg)
 
 
@@ -80,6 +96,12 @@ class SocketDucker:
     Each call opens a fresh connection. That is deliberate: the helper may be
     restarted (or granted permission) between utterances, and a cached dead
     socket would silently duck nothing for the rest of the process's life.
+
+    The release is deferred by ``hold_ms``: ``unduck`` only schedules it, and a
+    ``duck`` inside the window cancels it. Back-to-back utterances therefore
+    keep the music down rather than pumping it up and back, and the playback
+    thread never waits on the fade-up. If this process dies with a release
+    pending, the helper notices the spared pid is gone and releases on its own.
     """
 
     def __init__(self, config: DuckConfig) -> None:
@@ -90,6 +112,9 @@ class SocketDucker:
         """
         self._config = config
         self._warned = False
+        self._lock = threading.Lock()
+        self._ducked = False
+        self._release: threading.Timer | None = None
 
     def duck(self) -> None:
         """Ask the helper to ramp other audio down, sparing this process.
@@ -97,16 +122,42 @@ class SocketDucker:
         The pid matters: the helper's tap is global, so without it the voice
         itself would be tapped and ducked along with the music.
         """
-        self._send(f"duck {self._config.level} {self._config.fade_ms} {os.getpid()}")
+        with self._lock:
+            self._cancel_release()
+            if self._ducked:
+                return
+            config = self._config
+            self._ducked = self._send(f"duck {config.level} {config.fade_down_ms} {config.fade_up_ms} {os.getpid()}")
 
     def unduck(self) -> None:
-        """Ask the helper to ramp other audio back up."""
-        self._send("unduck")
+        """Schedule the music to ramp back up once ``hold_ms`` passes quietly."""
+        with self._lock:
+            self._cancel_release()
+            if not self._ducked:
+                return
+            timer = threading.Timer(self._config.hold_ms / 1000.0, self._release_now)
+            timer.daemon = True
+            self._release = timer
+            timer.start()
 
-    def _send(self, command: str) -> None:
+    def _release_now(self) -> None:
+        with self._lock:
+            if self._release is not threading.current_thread():
+                return  # superseded by a later duck/unduck
+            self._release = None
+            self._send("unduck")
+            self._ducked = False
+
+    def _cancel_release(self) -> None:
+        if self._release is not None:
+            self._release.cancel()
+            self._release = None
+
+    def _send(self, command: str) -> bool:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(self._config.fade_ms / 1000.0 + 2.0)
+                # unduck blocks in the helper for the release ramp.
+                sock.settimeout(max(self._config.fade_down_ms, self._config.fade_up_ms) / 1000.0 + 2.0)
                 sock.connect(self._config.socket_path)
                 sock.sendall(command.encode())
                 sock.recv(256)
@@ -119,6 +170,8 @@ class SocketDucker:
                     f"\n  ducking unavailable ({exc}); speaking at full music volume.",
                     file=sys.stderr,
                 )
+            return False
+        return True
 
 
 def ducker_from_config(config: dict[str, object]) -> Ducker:
@@ -153,7 +206,7 @@ def ducker_from_config(config: dict[str, object]) -> Ducker:
     if not enabled:
         return NullDucker()
 
-    missing = [key for key in ("socket", "level", "fade_ms") if key not in section]
+    missing = [key for key in ("socket", "level", "fade_down_ms", "fade_up_ms", "hold_ms") if key not in section]
     if missing:
         msg = f"config duck: enabled but missing {', '.join(missing)}"
         raise ValueError(msg)
@@ -170,15 +223,20 @@ def ducker_from_config(config: dict[str, object]) -> Ducker:
         msg = f"config duck.level: must be a number, got {level_value!r}"
         raise ValueError(msg)
 
-    fade_value = section["fade_ms"]
-    if isinstance(fade_value, bool) or not isinstance(fade_value, int):
-        msg = f"config duck.fade_ms: must be an integer, got {fade_value!r}"
-        raise ValueError(msg)
-
     return SocketDucker(
         DuckConfig(
             socket_path=str(Path(socket_value).expanduser()),
             level=float(level_value),
-            fade_ms=fade_value,
+            fade_down_ms=_require_int(section, "fade_down_ms"),
+            fade_up_ms=_require_int(section, "fade_up_ms"),
+            hold_ms=_require_int(section, "hold_ms"),
         )
     )
+
+
+def _require_int(section: dict[str, object], key: str) -> int:
+    value = section[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"config duck.{key}: must be an integer, got {value!r}"
+        raise ValueError(msg)
+    return value

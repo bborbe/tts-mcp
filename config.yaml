@@ -23,4 +23,9 @@ duck:
   enabled: false
   socket: ~/Library/Application Support/tts-mcp/duck.sock
   level: 0.25
-  fade_ms: 150
+  fade_down_ms: 100  # attack: quick drop so the first words are clear
+  fade_up_ms: 500    # release: gentle return after the voice stops
+  # How long the duck outlives an utterance. Longer than the gap while the
+  # next queued message generates (streaming_warmup_seconds + model latency),
+  # so back-to-back messages keep the music down instead of pumping it.
+  hold_ms: 1000

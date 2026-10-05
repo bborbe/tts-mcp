@@ -15,11 +15,12 @@
 // so if this helper dies, audio returns by itself rather than being stranded.
 //
 // Protocol (newline-delimited over a unix socket):
-//   duck <level> <fade_ms> [pid ...]
-//                  ramp other audio down to <level> (0.0-1.0) over <fade_ms>
-//                  (0-5000) and keep reading; the listed pids (the TTS server)
-//                  and this helper keep full volume
-//   unduck         ramp back to 1.0, then stop reading
+//   duck <level> <fade_down_ms> <fade_up_ms> [pid ...]
+//                  ramp other audio down to <level> (0.0-1.0) over <fade_down_ms>
+//                  and keep reading; the listed pids (the TTS server) and this
+//                  helper keep full volume. Fades are 0-5000 ms.
+//   unduck         ramp back to 1.0 over the last duck's <fade_up_ms>, then stop
+//                  reading
 //   status         reply with one line of state
 //   quit           tear down and exit
 
@@ -143,11 +144,13 @@ final class DuckEngine {
     private var procID: AudioDeviceIOProcID?
     private var masterUID: String?
     private var excludedObjects: [AudioObjectID] = []
+    private var sparedPIDs: [pid_t] = []
     private var reading = false
 
     /// Set by each `duck` command, so the ramp follows the server's config
     /// rather than a value baked into how the helper was launched.
     private var fadeMilliseconds = 150
+    private var fadeUpMilliseconds = 150
     private var sampleRate = 48000.0
 
     private func applyFade(_ milliseconds: Int) {
@@ -263,7 +266,11 @@ final class DuckEngine {
 
     /// - Parameter pids: processes that must keep full volume (the TTS server).
     ///   This helper's own pid is always added.
-    func duck(to level: Float, fadeMilliseconds fade: Int, sparing pids: [pid_t]) {
+    /// Fast attack, slow release: the drop clears the way for the voice's first
+    /// words, while the rise can be gentle because nothing is waiting on it.
+    func duck(to level: Float, fadeDown: Int, fadeUp: Int, sparing pids: [pid_t]) {
+        fadeUpMilliseconds = fadeUp
+        sparedPIDs = pids
         var objects: [AudioObjectID] = []
         for pid in pids + [getpid()] {
             if let object = processObject(for: pid) {
@@ -273,7 +280,7 @@ final class DuckEngine {
             }
         }
         rebuildIfNeeded(excluding: objects)
-        applyFade(fade)
+        applyFade(fadeDown)
         // Start reading *before* touching the gain: the tap mutes the original
         // only while it is being read, so reading at the current gain keeps the
         // handover level-continuous instead of dipping.
@@ -282,12 +289,24 @@ final class DuckEngine {
     }
 
     func unduck() {
+        applyFade(fadeUpMilliseconds)
         targetGain = 1.0
         // Let the ramp finish before releasing the tap, otherwise stopping mid
         // ramp would cut the tail off and step the level.
         let settle = Double(fadeMilliseconds) / 1000.0 + 0.05
         Thread.sleep(forTimeInterval: settle)
         stopReading()
+    }
+
+    /// Releases a duck whose owner is gone. The server unducks after its hold
+    /// window; if it crashes or is restarted first, that release never comes
+    /// and the music would otherwise stay down until this helper restarts.
+    func releaseIfSparedProcessGone() {
+        guard reading else { return }
+        guard let gone = sparedPIDs.first(where: { kill($0, 0) != 0 && errno == ESRCH }) else { return }
+        log("spared pid \(gone) exited while ducked — releasing")
+        sparedPIDs = []
+        unduck()
     }
 
     func teardown() {
@@ -364,6 +383,14 @@ log("listening on \(socketPath)")
 signal(SIGTERM) { _ in exit(0) }
 signal(SIGINT) { _ in exit(0) }
 
+// Every engine call runs on this queue — commands from the accept loop and the
+// owner-gone watchdog below — so the two never touch the tap concurrently.
+let engineQueue = DispatchQueue(label: "ttsduck.engine")
+let watchdog = DispatchSource.makeTimerSource(queue: engineQueue)
+watchdog.schedule(deadline: .now() + 1, repeating: 1)
+watchdog.setEventHandler { engine.releaseIfSparedProcessGone() }
+watchdog.resume()
+
 while true {
     let client = accept(fd, nil, nil)
     if client < 0 { continue }
@@ -374,15 +401,17 @@ while true {
         let command = String(decoding: buffer[0..<read], as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let parts = command.split(separator: " ")
+        let reply: String = engineQueue.sync {
         var reply = "ok"
 
         switch parts.first.map(String.init) ?? "" {
         case "duck":
             let level = parts.count > 1 ? (Float(parts[1]) ?? 0.25) : 0.25
-            // duck <level> <fade_ms> [pid ...]
-            let fade = parts.count > 2 ? (Int(parts[2]) ?? 150) : 150
-            let pids = parts.dropFirst(3).compactMap { pid_t($0) }
-            engine.duck(to: level, fadeMilliseconds: max(0, min(5000, fade)), sparing: pids)
+            // duck <level> <fade_down_ms> <fade_up_ms> [pid ...]
+            let down = parts.count > 2 ? (Int(parts[2]) ?? 150) : 150
+            let up = parts.count > 3 ? (Int(parts[3]) ?? 150) : 150
+            let pids = parts.dropFirst(4).compactMap { pid_t($0) }
+            engine.duck(to: level, fadeDown: max(0, min(5000, down)), fadeUp: max(0, min(5000, up)), sparing: pids)
         case "unduck":
             engine.unduck()
         case "status":
@@ -396,6 +425,8 @@ while true {
             exit(0)
         default:
             reply = "error unknown command"
+        }
+        return reply
         }
 
         _ = reply.withCString { write(client, $0, strlen($0)) }
