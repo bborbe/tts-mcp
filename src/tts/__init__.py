@@ -14,6 +14,13 @@ from src.tts.device import (
     restart_process_on_device_change,
     start_output_device_change_watcher,
 )
+from src.tts.duck import (
+    DuckConfig,
+    Ducker,
+    NullDucker,
+    SocketDucker,
+    ducker_from_config,
+)
 from src.tts.engine import (
     ENGINE_KINDS,
     QWEN3,
@@ -66,11 +73,15 @@ __all__ = [
     "AudioPlayer",
     "AudioSettings",
     "CustomVoiceModel",
+    "DuckConfig",
+    "Ducker",
     "EngineRegistry",
     "EngineSpec",
     "LoadedEngine",
+    "NullDucker",
     "PlaybackJob",
     "Qwen3Engine",
+    "SocketDucker",
     "StreamingPlaybackJob",
     "TTSEngine",
     "TTSModel",
@@ -83,6 +94,7 @@ __all__ = [
     "config_env_var",
     "default_output_device_id",
     "discover_models",
+    "ducker_from_config",
     "generate_chunks",
     "iter_stream_chunks",
     "load_config",

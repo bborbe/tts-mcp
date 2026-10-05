@@ -24,6 +24,7 @@ from src.tts import (
     QWEN3,
     AudioPlayer,
     AudioSettings,
+    Ducker,
     EngineRegistry,
     EngineSpec,
     LoadedEngine,
@@ -31,6 +32,7 @@ from src.tts import (
     build_engine,
     clean_text,
     default_output_device_id,
+    ducker_from_config,
     generate_chunks,
     load_config,
     make_output_path,
@@ -139,6 +141,7 @@ class ServerState:
         stream: bool,
         streaming_interval: float,
         streaming_warmup_seconds: float,
+        ducker: Ducker,
     ) -> None:
         """Initialize server state.
 
@@ -169,6 +172,8 @@ class ServerState:
             streaming_interval: Approximate seconds of audio per streamed chunk.
             streaming_warmup_seconds: Seconds buffered to measure the streaming
                 normalization gain (see normalize_stream).
+            ducker: Lowers other apps' audio around each utterance. Public
+                because the audio worker reads it when building its player.
         """
         self._registry = registry
         self._voices_by_engine = voices_by_engine
@@ -188,6 +193,7 @@ class ServerState:
         self._stream = stream
         self._streaming_interval = streaming_interval
         self._streaming_warmup_seconds = streaming_warmup_seconds
+        self._ducker = ducker
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
@@ -392,6 +398,11 @@ class ServerState:
         """Guards the statuses dict."""
         return self._status_lock
 
+    @property
+    def ducker(self) -> Ducker:
+        """Ducker the audio worker hands to its AudioPlayer."""
+        return self._ducker
+
     def audio_settings(self) -> AudioSettings:
         """Build the worker AudioSettings from this state's fields."""
         return AudioSettings(
@@ -405,6 +416,7 @@ class ServerState:
             stream=self._stream,
             streaming_interval=self._streaming_interval,
             streaming_warmup_seconds=self._streaming_warmup_seconds,
+            ducker=self._ducker,
         )
 
     def next_message_id(self) -> str:
@@ -1481,7 +1493,7 @@ def server_audio_worker(state: ServerState) -> None:
     if _load_default_engine(state) is None:
         return
 
-    player = AudioPlayer(state.sample_rate, state.lead_silence_ms)
+    player = AudioPlayer(state.sample_rate, state.lead_silence_ms, state.ducker)
     try:
         if state.stream:
             _run_streaming_server_loop(state, player)
@@ -1529,6 +1541,7 @@ class _ServerConfig:
     stream: bool
     streaming_interval: float
     streaming_warmup_seconds: float
+    ducker: Ducker
 
 
 def _require(config: dict[str, object], key: str) -> object:
@@ -1741,6 +1754,7 @@ def _parse_server_config() -> _ServerConfig:
         stream=bool(_require(config, "stream")),
         streaming_interval=float(cast(float, _require(config, "streaming_interval"))),
         streaming_warmup_seconds=float(cast(float, _require(config, "streaming_warmup_seconds"))),
+        ducker=ducker_from_config(config),
     )
 
 
@@ -1851,6 +1865,7 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         stream=cfg.stream,
         streaming_interval=cfg.streaming_interval,
         streaming_warmup_seconds=cfg.streaming_warmup_seconds,
+        ducker=cfg.ducker,
     )
 
     for kind, error in engine_errors.items():
