@@ -28,9 +28,11 @@ from src.tts import (
     QWEN3,
     VOXTRAL,
     AudioPlayer,
+    Ducker,
     EngineRegistry,
     EngineSpec,
     LoadedEngine,
+    NullDucker,
     VoxtralEngine,
 )
 
@@ -61,6 +63,7 @@ def _make_state(
     default_engine: str = VOXTRAL,
     engine_default_voices: dict[str, str] | None = None,
     allowed_voices_by_engine: dict[str, tuple[str, ...]] | None = None,
+    ducker: Ducker | None = None,
 ) -> ServerState:
     """Create a ServerState for testing.
 
@@ -84,6 +87,8 @@ def _make_state(
         engine_default_voices = {default_engine: default_voice}
     if allowed_voices_by_engine is None:
         allowed_voices_by_engine = {}
+    if ducker is None:
+        ducker = NullDucker()
     state = ServerState(
         registry=registry,
         voices_by_engine=voices_by_engine,
@@ -103,6 +108,7 @@ def _make_state(
         stream=stream,
         streaming_interval=streaming_interval,
         streaming_warmup_seconds=streaming_warmup_seconds,
+        ducker=ducker,
     )
     if preload_model:
         # Mirror what the worker reports after loading, so /voices sees it.
@@ -141,9 +147,10 @@ class _ImmediateAudioPlayer:
     active_count = 0
     max_active_count = 0
 
-    def __init__(self, sample_rate: int, lead_silence_ms: int) -> None:
+    def __init__(self, sample_rate: int, lead_silence_ms: int, ducker: Ducker | None = None) -> None:
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
+        self._ducker = ducker if ducker is not None else NullDucker()
 
     def submit(self, job: Any) -> None:
         _ImmediateAudioPlayer.active_count += 1

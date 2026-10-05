@@ -12,6 +12,7 @@ from typing import Any, cast
 import numpy as np
 import sounddevice as sd
 
+from src.tts.duck import Ducker, NullDucker
 from src.tts.protocols import AudioOutputStream
 
 WRITE_SLICE_SECONDS: float = 0.1
@@ -170,12 +171,19 @@ class AudioPlayer:
     _write_lead_silence absorbs the per-open CoreAudio startup clip.
     """
 
-    def __init__(self, sample_rate: int, lead_silence_ms: int) -> None:
+    def __init__(
+        self,
+        sample_rate: int,
+        lead_silence_ms: int,
+        ducker: Ducker | None = None,
+    ) -> None:
         """Initialize the persistent audio player.
 
         Args:
             sample_rate: Audio sample rate in Hz.
             lead_silence_ms: Silence written after each stream open/reopen.
+            ducker: Lowers other apps' audio around each utterance. Defaults to
+                a no-op ducker, so playback is unaffected when ducking is off.
 
         Raises:
             ValueError: If lead_silence_ms is negative.
@@ -186,6 +194,7 @@ class AudioPlayer:
 
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
+        self._ducker: Ducker = ducker if ducker is not None else NullDucker()
         self._slice_frames = max(1, int(sample_rate * WRITE_SLICE_SECONDS))
         self._jobs: queue.Queue[PlaybackJob | StreamingPlaybackJob | None] = queue.Queue()
         self._unhandled_errors: queue.Queue[Exception] = queue.Queue()
@@ -391,14 +400,22 @@ class AudioPlayer:
         try:
             while True:
                 job = self._jobs.get()
+                ducked = False
                 try:
                     if job is None:
                         break
+                    # Duck before the first sample reaches the device, and
+                    # unduck in the finally so cancel and error paths restore
+                    # the music too — not just a clean finish.
+                    self._ducker.duck()
+                    ducked = True
                     if isinstance(job, StreamingPlaybackJob):
                         stream = self._handle_streaming_job(stream, job)
                     else:
                         stream = self._handle_job(stream, job)
                 finally:
+                    if ducked:
+                        self._ducker.unduck()
                     self._jobs.task_done()
         finally:
             try:

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.bborbe.tts-mcp.duck</string>
+  <key>CFBundleName</key>
+  <string>TTSDuck</string>
+  <key>CFBundleExecutable</key>
+  <string>TTSDuck</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.4</string>
+  <key>LSUIElement</key>
+  <true/>
+  <!-- Required for the kTCCServiceAudioCapture prompt. Without a usage
+       description macOS will not even offer the grant, which is why this
+       helper has to be a bundle rather than a bare binary. -->
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Lowers the volume of other apps while the TTS voice is speaking.</string>
+</dict>
+</plist>

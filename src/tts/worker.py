@@ -11,6 +11,7 @@ import numpy as np
 import pyloudnorm as pyln
 from mlx_audio.tts.utils import load
 
+from src.tts.duck import Ducker, NullDucker
 from src.tts.engine import TTSEngine
 from src.tts.generate import generate_chunks, iter_stream_chunks
 from src.tts.normalize import normalize_chunks, normalize_stream
@@ -38,6 +39,9 @@ class AudioSettings:
         streaming_interval: Approximate seconds of audio per streamed chunk.
         streaming_warmup_seconds: Seconds buffered to measure the streaming
             normalization gain (see normalize_stream).
+        ducker: Lowers other apps' audio around each utterance. Defaults to a
+            no-op ducker, so a caller that does not configure ducking (the CLI)
+            is unaffected.
     """
 
     sample_rate: int
@@ -50,6 +54,7 @@ class AudioSettings:
     stream: bool
     streaming_interval: float
     streaming_warmup_seconds: float
+    ducker: Ducker = dataclasses.field(default_factory=NullDucker)
 
 
 def _generate_worker_chunks(engine: TTSEngine, model: TTSModel, text: str, voice: str, settings: AudioSettings) -> list[np.ndarray] | None:
@@ -248,7 +253,7 @@ def audio_worker(
         output_path: Path to save generated audio, or None to skip saving.
         settings: Audio generation, normalization, and playback settings.
     """
-    player = AudioPlayer(settings.sample_rate, settings.lead_silence_ms)
+    player = AudioPlayer(settings.sample_rate, settings.lead_silence_ms, settings.ducker)
     try:
         if settings.stream:
             _run_streaming_worker(work_queue, engine, model, voice, output_path, player, settings)
