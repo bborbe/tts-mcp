@@ -193,7 +193,7 @@ class ServerState:
         self._stream = stream
         self._streaming_interval = streaming_interval
         self._streaming_warmup_seconds = streaming_warmup_seconds
-        self.ducker = ducker
+        self._ducker = ducker
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
         self.ready_queue: queue.Queue[BaseException | None] = queue.Queue()
         self.statuses: dict[str, MessageStatus] = {}
@@ -398,6 +398,11 @@ class ServerState:
         """Guards the statuses dict."""
         return self._status_lock
 
+    @property
+    def ducker(self) -> Ducker:
+        """Ducker the audio worker hands to its AudioPlayer."""
+        return self._ducker
+
     def audio_settings(self) -> AudioSettings:
         """Build the worker AudioSettings from this state's fields."""
         return AudioSettings(
@@ -411,7 +416,7 @@ class ServerState:
             stream=self._stream,
             streaming_interval=self._streaming_interval,
             streaming_warmup_seconds=self._streaming_warmup_seconds,
-            ducker=self.ducker,
+            ducker=self._ducker,
         )
 
     def next_message_id(self) -> str:
