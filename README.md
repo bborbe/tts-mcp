@@ -312,6 +312,49 @@ utterance-level loudness normalization following ITU-R BS.1770-4 (the EBU R128 s
 - The same normalized audio is used for both speaker playback and the saved WAV file, so there is no drift between
   what you hear and what is written to disk.
 
+### Ducking other audio
+
+While the voice speaks, every other app (music, video, a browser tab) can be lowered to a fixed level and brought
+back afterwards. The voice itself is never touched.
+
+```yaml
+duck:
+  enabled: true
+  socket: ~/Library/Application Support/tts-mcp/duck.sock
+  level: 0.25      # gain for other apps while speaking, 0.0-1.0
+  fade_down_ms: 100  # attack: how fast other audio drops, 0 = step, max 5000
+  fade_up_ms: 500    # release: how gently it returns, max 5000
+  hold_ms: 1000      # how long the duck outlives an utterance, max 60000
+```
+
+The ducking is done by a small Swift helper, `TTSDuck.app`, using a CoreAudio process tap. It has to be a separate,
+code-signed app started by launchd: a tap needs the macOS audio-capture permission, which is only granted to an app
+bundle, and a process spawned by the server would inherit the server's identity and get silence.
+
+```bash
+make duck-helper-agent          # build, install ~/Applications/TTSDuck.app, load launchd agent com.bborbe.tts-mcp.duck
+make duck-helper-agent-remove   # stop and remove both
+```
+
+The first duck raises the macOS audio-capture prompt; allow it. The helper is ad-hoc signed, so a rebuild changes its
+signature and macOS asks again.
+
+Behaviour worth knowing:
+
+- **Back-to-back messages stay ducked.** The release is deferred by `hold_ms`; a new message inside that window
+  keeps the music down instead of letting it rise between sentences. Set it above the gap while the next message
+  generates.
+- **Nothing gets stranded.** If the helper dies, the tap dies with it and audio returns. If the server dies while
+  ducked, the helper notices the server's pid is gone and releases within a second.
+- **Best-effort.** With no helper running, speech plays at full music volume and one warning is logged.
+
+Check the helper's state directly:
+
+```bash
+printf status | nc -U "$HOME/Library/Application Support/tts-mcp/duck.sock"
+# reading=1 gain=0.250 target=0.250 ... excluded=<helper>,<server> device=...
+```
+
 ## Usage
 
 | Command | Description |
