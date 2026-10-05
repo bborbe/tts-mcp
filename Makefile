@@ -66,7 +66,20 @@ duck-helper-install: duck-helper
 	rm -rf $(HELPER_HOME)
 	cp -R $(HELPER_APP) $(HELPER_HOME)
 	@echo "installed $(HELPER_HOME)"
-	@echo "grant it once: System Settings > Privacy & Security > Screen & System Audio Recording"
+	@echo "first run asks for audio-capture permission; allow it"
+
+HELPER_AGENT := $(HOME)/Library/LaunchAgents/com.bborbe.tts-mcp.duck.plist
+
+.PHONY: duck-helper-agent
+# Install and (re)start the launchd agent that keeps the helper running.
+# launchd, not the TTS server, must start it: a child inherits the server's TCC
+# identity and the tap would return silence.
+duck-helper-agent: duck-helper-install
+	mkdir -p "$(HOME)/Library/Logs/tts-mcp" "$(HOME)/Library/Application Support/tts-mcp"
+	sed 's#__HOME__#$(HOME)#g' helper/com.bborbe.tts-mcp.duck.plist > $(HELPER_AGENT)
+	-launchctl bootout gui/$$(id -u)/com.bborbe.tts-mcp.duck 2>/dev/null
+	launchctl bootstrap gui/$$(id -u) $(HELPER_AGENT)
+	@echo "loaded com.bborbe.tts-mcp.duck (log: ~/Library/Logs/tts-mcp/duck.log)"
 
 .PHONY: clean-local
 # Clean build artifacts (local)

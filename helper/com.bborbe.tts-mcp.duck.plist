@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template: make duck-helper-agent substitutes __HOME__ and installs this to
+     ~/Library/LaunchAgents. The helper must be started by launchd (or
+     LaunchServices), never spawned by the TTS server: a child process inherits
+     its parent's TCC identity, and the tap then returns silence. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bborbe.tts-mcp.duck</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/Applications/TTSDuck.app/Contents/MacOS/TTSDuck</string>
+        <string>__HOME__/Library/Application Support/tts-mcp/duck.sock</string>
+        <string>150</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- The IOProc runs on a realtime thread either way; this keeps the
+         control loop responsive under load, same as the TTS server. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/tts-mcp/duck.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/tts-mcp/duck.log</string>
+</dict>
+</plist>
