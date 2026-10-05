@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
+MAX_FADE_MS = 5000
+"""Longest ramp the helper accepts; it clamps to the same bound."""
+
 
 @dataclass(frozen=True)
 class DuckConfig:
@@ -27,7 +30,8 @@ class DuckConfig:
     Attributes:
         socket_path: Unix socket the TTSDuck helper listens on.
         level: Gain applied to other apps while speaking, 0.0-1.0.
-        fade_ms: Ramp duration in each direction, in milliseconds.
+        fade_ms: Ramp duration in each direction, in milliseconds. Sent to the
+            helper with every duck, so this value is what shapes the ramp.
     """
 
     socket_path: str
@@ -43,8 +47,8 @@ class DuckConfig:
         if not 0.0 <= self.level <= 1.0:
             msg = f"duck level must be between 0.0 and 1.0, got {self.level}"
             raise ValueError(msg)
-        if self.fade_ms < 0:
-            msg = f"duck fade_ms must be >= 0, got {self.fade_ms}"
+        if not 0 <= self.fade_ms <= MAX_FADE_MS:
+            msg = f"duck fade_ms must be between 0 and {MAX_FADE_MS}, got {self.fade_ms}"
             raise ValueError(msg)
 
 
@@ -93,7 +97,7 @@ class SocketDucker:
         The pid matters: the helper's tap is global, so without it the voice
         itself would be tapped and ducked along with the music.
         """
-        self._send(f"duck {self._config.level} {os.getpid()}")
+        self._send(f"duck {self._config.level} {self._config.fade_ms} {os.getpid()}")
 
     def unduck(self) -> None:
         """Ask the helper to ramp other audio back up."""

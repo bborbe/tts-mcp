@@ -15,9 +15,10 @@
 // so if this helper dies, audio returns by itself rather than being stranded.
 //
 // Protocol (newline-delimited over a unix socket):
-//   duck <level> [pid ...]
-//                  ramp other audio down to <level> (0.0-1.0) and keep reading;
-//                  the listed pids (the TTS server) and this helper keep full volume
+//   duck <level> <fade_ms> [pid ...]
+//                  ramp other audio down to <level> (0.0-1.0) over <fade_ms>
+//                  (0-5000) and keep reading; the listed pids (the TTS server)
+//                  and this helper keep full volume
 //   unduck         ramp back to 1.0, then stop reading
 //   status         reply with one line of state
 //   quit           tear down and exit
@@ -144,10 +145,17 @@ final class DuckEngine {
     private var excludedObjects: [AudioObjectID] = []
     private var reading = false
 
-    let fadeMilliseconds: Int
+    /// Set by each `duck` command, so the ramp follows the server's config
+    /// rather than a value baked into how the helper was launched.
+    private var fadeMilliseconds = 150
+    private var sampleRate = 48000.0
 
-    init(fadeMilliseconds: Int) {
-        self.fadeMilliseconds = fadeMilliseconds
+    private func applyFade(_ milliseconds: Int) {
+        fadeMilliseconds = milliseconds
+        // A zero fade is a step: reach the target within one sample.
+        rampStepPerSample = milliseconds == 0
+            ? 1.0
+            : Float(1.0 / (sampleRate * Double(milliseconds) / 1000.0))
     }
 
     /// Rebuilds the tap if the default output device or the exclusion set
@@ -201,8 +209,8 @@ final class DuckEngine {
             fail("create aggregate status=\(aggStatus)")
         }
 
-        let rate = nominalSampleRate(device)
-        rampStepPerSample = Float(1.0 / (rate * Double(fadeMilliseconds) / 1000.0))
+        sampleRate = nominalSampleRate(device)
+        applyFade(fadeMilliseconds)
 
         let ioStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil) {
             _, inInputData, _, outOutputData, _ in
@@ -255,7 +263,7 @@ final class DuckEngine {
 
     /// - Parameter pids: processes that must keep full volume (the TTS server).
     ///   This helper's own pid is always added.
-    func duck(to level: Float, sparing pids: [pid_t]) {
+    func duck(to level: Float, fadeMilliseconds fade: Int, sparing pids: [pid_t]) {
         var objects: [AudioObjectID] = []
         for pid in pids + [getpid()] {
             if let object = processObject(for: pid) {
@@ -265,6 +273,7 @@ final class DuckEngine {
             }
         }
         rebuildIfNeeded(excluding: objects)
+        applyFade(fade)
         // Start reading *before* touching the gain: the tap mutes the original
         // only while it is being read, so reading at the current gain keeps the
         // handover level-continuous instead of dipping.
@@ -318,7 +327,6 @@ final class DuckEngine {
 
 let args = CommandLine.arguments
 let socketPath = args.count > 1 ? args[1] : "/tmp/ttsduck.sock"
-let fadeMs = args.count > 2 ? (Int(args[2]) ?? 150) : 150
 
 // A stale socket from a previous run would make bind() fail.
 try? FileManager.default.removeItem(atPath: socketPath)
@@ -343,10 +351,12 @@ let bindResult = withUnsafePointer(to: &addr) { ptr in
     }
 }
 guard bindResult == 0 else { fail("bind(\(socketPath)) failed: errno \(errno)") }
+// Owner-only: any process able to connect can mute other apps' audio.
+guard chmod(socketPath, 0o600) == 0 else { fail("chmod(\(socketPath)) failed: errno \(errno)") }
 guard listen(fd, 8) == 0 else { fail("listen failed") }
 
-let engine = DuckEngine(fadeMilliseconds: fadeMs)
-log("listening on \(socketPath) (fade \(fadeMs)ms)")
+let engine = DuckEngine()
+log("listening on \(socketPath)")
 
 // No teardown on the way out is needed: the tap is owned by this process, and
 // mutedWhenTapped releases the moment we stop reading, so a hard exit restores
@@ -369,8 +379,10 @@ while true {
         switch parts.first.map(String.init) ?? "" {
         case "duck":
             let level = parts.count > 1 ? (Float(parts[1]) ?? 0.25) : 0.25
-            let pids = parts.dropFirst(2).compactMap { pid_t($0) }
-            engine.duck(to: level, sparing: pids)
+            // duck <level> <fade_ms> [pid ...]
+            let fade = parts.count > 2 ? (Int(parts[2]) ?? 150) : 150
+            let pids = parts.dropFirst(3).compactMap { pid_t($0) }
+            engine.duck(to: level, fadeMilliseconds: max(0, min(5000, fade)), sparing: pids)
         case "unduck":
             engine.unduck()
         case "status":

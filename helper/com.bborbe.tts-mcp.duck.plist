@@ -13,7 +13,6 @@
     <array>
         <string>__HOME__/Applications/TTSDuck.app/Contents/MacOS/TTSDuck</string>
         <string>__HOME__/Library/Application Support/tts-mcp/duck.sock</string>
-        <string>150</string>
     </array>
 
     <key>RunAtLoad</key>

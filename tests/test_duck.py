@@ -1,8 +1,10 @@
 """Tests for ducking other applications' audio around each utterance."""
 
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from src.tts.duck import (
@@ -32,8 +34,12 @@ class TestDuckConfig:
             DuckConfig(socket_path="/tmp/x.sock", level=-0.1, fade_ms=150)
 
     def test_rejects_negative_fade(self) -> None:
-        with pytest.raises(ValueError, match="fade_ms must be >= 0"):
+        with pytest.raises(ValueError, match="fade_ms must be between 0 and 5000"):
             DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=-1)
+
+    def test_rejects_fade_above_the_helper_cap(self) -> None:
+        with pytest.raises(ValueError, match="fade_ms must be between 0 and 5000"):
+            DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_ms=5001)
 
 
 class TestDuckerFromConfig:
@@ -90,7 +96,7 @@ class TestSocketDucker:
             self._ducker().duck()
 
         sock.connect.assert_called_once_with("/tmp/x.sock")
-        sock.sendall.assert_called_once_with(f"duck 0.25 {os.getpid()}".encode())
+        sock.sendall.assert_called_once_with(f"duck 0.25 150 {os.getpid()}".encode())
 
     def test_unduck_sends_the_command(self) -> None:
         with patch("src.tts.duck.socket.socket") as mock_socket:
@@ -162,3 +168,81 @@ class TestPlayerIntegration:
         ducker = MagicMock()
         player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=ducker)
         assert player._ducker is ducker
+
+
+class TestPlayerDuckPairing:
+    """AudioPlayer._run must unduck on every exit path, or music stays quiet."""
+
+    @staticmethod
+    def _recording_ducker(events: list[str]) -> MagicMock:
+        ducker = MagicMock()
+        ducker.duck.side_effect = lambda: events.append("duck")
+        ducker.unduck.side_effect = lambda: events.append("unduck")
+        return ducker
+
+    @patch("src.tts.player.sd")
+    def test_ducks_before_audio_and_unducks_after(self, mock_sd: MagicMock) -> None:
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = lambda _frames: events.append("write")
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        player.submit(PlaybackJob(chunks=[np.ones(100, dtype=np.float32)] * 2, output_path=None))
+        player.close()
+
+        assert events[0] == "duck"
+        assert events[-1] == "unduck"
+        assert events.count("duck") == 1
+        assert events.count("unduck") == 1
+        assert "write" in events
+
+    @patch("src.tts.player.sd")
+    def test_unducks_when_playback_is_cancelled(self, mock_sd: MagicMock) -> None:
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        cancel = threading.Event()
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = lambda _frames: cancel.set()
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        cancelled: list[bool] = []
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 4,
+                output_path=None,
+                on_cancel=lambda: cancelled.append(True),
+                cancel=cancel,
+            )
+        )
+        player.close()
+
+        assert cancelled == [True]
+        assert events == ["duck", "unduck"]
+
+    @patch("src.tts.player.sd")
+    def test_unducks_when_playback_fails(self, mock_sd: MagicMock) -> None:
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = RuntimeError("device gone")
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        errors: list[Exception] = []
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)],
+                output_path=None,
+                on_error=errors.append,
+            )
+        )
+        player.close()
+
+        assert len(errors) == 1
+        assert events == ["duck", "unduck"]

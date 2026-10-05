@@ -45,6 +45,12 @@ resume:
 download:
 	bash scripts/download-model.sh
 
+# Every install path below hangs off $(HOME); an empty HOME would aim
+# `rm -rf` at /Applications and the plist at /Library. Fail instead.
+ifeq ($(strip $(HOME)),)
+$(error HOME is not set; refusing to compute install paths)
+endif
+
 HELPER_APP := build/TTSDuck.app
 HELPER_HOME := $(HOME)/Applications/TTSDuck.app
 
@@ -63,7 +69,7 @@ duck-helper:
 # Rebuilding changes the cdhash and macOS will ask for the grant again.
 duck-helper-install: duck-helper
 	mkdir -p $(HOME)/Applications
-	rm -rf $(HELPER_HOME)
+	rm -rf "$(HELPER_HOME)"
 	cp -R $(HELPER_APP) $(HELPER_HOME)
 	@echo "installed $(HELPER_HOME)"
 	@echo "first run asks for audio-capture permission; allow it"
@@ -76,10 +82,24 @@ HELPER_AGENT := $(HOME)/Library/LaunchAgents/com.bborbe.tts-mcp.duck.plist
 # identity and the tap would return silence.
 duck-helper-agent: duck-helper-install
 	mkdir -p "$(HOME)/Library/Logs/tts-mcp" "$(HOME)/Library/Application Support/tts-mcp"
-	sed 's#__HOME__#$(HOME)#g' helper/com.bborbe.tts-mcp.duck.plist > $(HELPER_AGENT)
-	-launchctl bootout gui/$$(id -u)/com.bborbe.tts-mcp.duck 2>/dev/null
-	launchctl bootstrap gui/$$(id -u) $(HELPER_AGENT)
+	sed 's#__HOME__#$(HOME)#g' helper/com.bborbe.tts-mcp.duck.plist > "$(HELPER_AGENT)"
+	# Boot out only when loaded, so a failure here is a real failure and the
+	# bootstrap below never reports a misleading "already loaded".
+	if launchctl print gui/$$(id -u)/com.bborbe.tts-mcp.duck >/dev/null 2>&1; then \
+		launchctl bootout gui/$$(id -u)/com.bborbe.tts-mcp.duck; \
+	fi
+	launchctl bootstrap gui/$$(id -u) "$(HELPER_AGENT)"
 	@echo "loaded com.bborbe.tts-mcp.duck (log: ~/Library/Logs/tts-mcp/duck.log)"
+
+.PHONY: duck-helper-agent-remove
+# Stop the launchd agent and remove it, the plist and the installed helper
+duck-helper-agent-remove:
+	if launchctl print gui/$$(id -u)/com.bborbe.tts-mcp.duck >/dev/null 2>&1; then \
+		launchctl bootout gui/$$(id -u)/com.bborbe.tts-mcp.duck; \
+	fi
+	rm -f "$(HELPER_AGENT)"
+	rm -rf "$(HELPER_HOME)"
+	@echo "removed com.bborbe.tts-mcp.duck and $(HELPER_HOME)"
 
 .PHONY: clean-local
 # Clean build artifacts (local)
