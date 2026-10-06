@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.21.0
 
 - refactor: Remove the per-session stdio relay (`mcp/`, its `mcp-typecheck`/`mcp-test` targets and CI's Node setup); MCP is served by the FastAPI server at `/mcp`. Configs point at `http://127.0.0.1:12000/mcp` (`type: http`) instead of `npx -y tsx …/tts-mcp.ts`. README and the voice playbook describe the in-server endpoint and header-based attribution.
 - feat: Add `scripts/claude-session-headers`, a `headersHelper` for the `/mcp` config. Claude Code sends no session header on HTTP MCP requests, so the helper — run once per connection as a child of the session's `claude` process — reads that process's `sessionId` from `~/.claude/sessions/<pid>.json` and supplies `X-Claude-Code-Session-Id`, which the server resolves to the session's name. Without it every `say` over `/mcp` is unattributed.
