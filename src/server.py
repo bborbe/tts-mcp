@@ -932,9 +932,9 @@ def queue_say(state: ServerState, body: SayRequest) -> SayResponse:
             detail=f"Engine '{engine}' is unavailable: {error}",
         )
 
-    # The one choke point every caller passes — the MCP relay, the CLI and a
+    # The one choke point every caller passes — the MCP tool, the CLI and a
     # bare curl alike — so the allowlist is enforced here rather than in the
-    # relay, where a direct POST to this endpoint would bypass it.
+    # MCP layer, where a direct POST to this endpoint would bypass it.
     voice = resolve_voice(body.voice, engine, state.engine_default_voice(engine), state.allowed_voices_for(engine))
     if voice not in engine_voices:
         raise HTTPException(

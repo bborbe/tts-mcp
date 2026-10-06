@@ -10,7 +10,7 @@
 #   tts-resume                # resume the message that is paused
 #   tts-resume <message_id>   # resume one specific message
 #
-# Config resolution matches mcp/tts-mcp.ts and src/tts/config.py:
+# Config resolution matches src/tts/config.py:
 #   1. $TTS_MCP_CONFIG
 #   2. $XDG_CONFIG_HOME/tts-mcp/config.yaml (default ~/.config/tts-mcp/config.yaml)
 #   3. <project root>/config.yaml

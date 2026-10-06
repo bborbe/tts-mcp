@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- refactor: Remove the per-session stdio relay (`mcp/`, its `mcp-typecheck`/`mcp-test` targets and CI's Node setup); MCP is served by the FastAPI server at `/mcp`. Configs point at `http://127.0.0.1:12000/mcp` (`type: http`) instead of `npx -y tsx …/tts-mcp.ts`. README and the voice playbook describe the in-server endpoint and header-based attribution.
 - feat: Serve MCP from the FastAPI server at `/mcp` (StreamableHTTP) with the same six tools as the stdio relay (`say`, `get_status`, `get_voices`, `pause`, `resume`, `cancel`), so sessions can share one endpoint instead of spawning a relay each. Each tool calls the same function as its HTTP route. `say` attributes the utterance to the calling session by resolving the `X-Claude-Code-Session-Id` header against `~/.claude/sessions`, falling back to `sender`. The stdio relay in `mcp/` is unchanged. Tool bodies run in the threadpool, as the HTTP routes do, so a history write never stalls other sessions. The MCP app is mounted at the root, so a path no route matches now gets its plain-text 404 instead of FastAPI's JSON `{"detail": "Not Found"}`.
 
 ## v0.20.0
