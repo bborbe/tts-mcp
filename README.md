@@ -18,7 +18,7 @@ Local text-to-speech on Apple Silicon via MLX, with real-time streaming playback
 | Emotion Control | Qwen3 accepts a free-text `instruct` per request (e.g. "Very happy and excited.") |
 | Multi-Model | Voxtral 4B in 4-bit / 6-bit / bf16; Qwen3-TTS 1.7B CustomVoice in 4-bit / 8-bit |
 
-Under the hood, the project uses [mlx-audio](https://github.com/Blaizzy/mlx-audio) for model loading and inference on Apple Silicon, [sounddevice](https://python-sounddevice.readthedocs.io/) for real-time audio output, and [FastAPI](https://fastapi.tiangolo.com/) for the HTTP server. The MCP server is a lightweight TypeScript relay using the [Model Context Protocol SDK](https://modelcontextprotocol.io/).
+Under the hood, the project uses [mlx-audio](https://github.com/Blaizzy/mlx-audio) for model loading and inference on Apple Silicon, [sounddevice](https://python-sounddevice.readthedocs.io/) for real-time audio output, and [FastAPI](https://fastapi.tiangolo.com/) for the HTTP server. The MCP endpoint is served by the FastAPI server itself at `/mcp`, using the [Model Context Protocol Python SDK](https://github.com/modelcontextprotocol/python-sdk).
 
 ## Design Principles
 
@@ -80,7 +80,6 @@ There are two independent entry paths into the system. The interactive CLI (`src
 - **Python 3.12+**
 - **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
 - **make** — preinstalled with the Xcode Command Line Tools
-- **Node.js 18+** — For the MCP server (optional)
 
 ## Project Structure
 
@@ -106,8 +105,10 @@ There are two independent entry paths into the system. The interactive CLI (`src
 │   ├── test_tts.py
 │   └── architecture/       # Architecture import rule tests
 ├── scripts/                # Utility scripts
+│   ├── claude-session-headers  # headersHelper: session id header for /mcp
 │   ├── download-model.sh   # Interactive model downloader
-│   └── test-concurrent-say.py  # Concurrent /say load test
+│   ├── test-concurrent-say.py  # Concurrent /say load test
+│   └── tts-skip, tts-pause, tts-resume  # Playback control from the shell
 ├── data/
 │   └── output/             # Generated WAV files
 ├── config.yaml             # Local configuration (gitignored)

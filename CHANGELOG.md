@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- docs: README no longer describes a TypeScript relay or lists Node.js as a prerequisite. Rollout note: a Claude Code session started before its config switched to `/mcp` keeps its already-running stdio relay, but if it respawns the relay (an `/mcp` reconnect) the respawn fails because `mcp/` is gone — restart the session to pick up the HTTP config and `headersHelper`.
+- fix: `scripts/claude-session-headers` stops walking cleanly when `ps` cannot read a parent pid, instead of printing a shell error.
+
 ## v0.22.0
 
 - refactor: Remove the per-session stdio relay (`mcp/`, its `mcp-typecheck`/`mcp-test` targets and CI's Node setup); MCP is served by the FastAPI server at `/mcp`. Configs point at `http://127.0.0.1:12000/mcp` (`type: http`) instead of `npx -y tsx …/tts-mcp.ts`. README and the voice playbook describe the in-server endpoint and header-based attribution.
