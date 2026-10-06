@@ -533,6 +533,11 @@ from the request's `X-Claude-Code-Session-Id` header and resolves it against the
 label follows `/rename`. The tool's own `sender` argument is a fallback, used only when the header is absent or names
 no registry entry.
 
+Claude Code does not send that header by itself. The config's `headersHelper` supplies it:
+`scripts/claude-session-headers` runs once per connection as a child of the session's `claude` process, walks up to that
+process, reads its `sessionId` from the registry and prints `{"X-Claude-Code-Session-Id": "<id>"}`. Without the helper
+every session's `say` is unattributed unless the caller passes `sender`.
+
 Resolution is best-effort: it never fails a `say`. A miss is logged at warning level and the utterance is spoken
 regardless.
 
@@ -545,7 +550,8 @@ Point the MCP configuration at the running server — no install step and no per
   "mcpServers": {
     "tts": {
       "type": "http",
-      "url": "http://127.0.0.1:12000/mcp"
+      "url": "http://127.0.0.1:12000/mcp",
+      "headersHelper": "/path/to/tts-mcp/scripts/claude-session-headers"
     }
   }
 }

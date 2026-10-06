@@ -19,5 +19,5 @@ Use when:
    - `mcp__tts__get_voices` — is the server reachable at all? Errors → server down.
    - `mcp__tts__get_status` with the test `message_id` — did it reach `playing` / `completed`, or stick at `queued` / `error`? `queued` forever = playback worker wedged; `error` = synth or device failure (read the error field).
    - Re-send one test line — a transient queue hiccup often clears on retry.
-   - Still silent → **check which case this is before restarting.** `/tts-mcp:restart` carries the three-way table (dropped binding / wedged relay / stale device); only the last is fixed by a restart, and restarting can *cause* the wedged-relay case. Then re-run this test.
+   - Still silent → **check which case this is before restarting.** `/tts-mcp:restart` carries the three-way table (dropped binding / stale MCP connection / stale device); only the last is fixed by a restart, and restarting can *cause* the stale-connection case. Then re-run this test.
 5. **If it still fails after a restart:** report the specific failure (server unreachable / stuck queue / device error), and tell the user voice is unavailable so they don't rely on it. Fall back to on-screen only for the session. Never silently pretend it works.
