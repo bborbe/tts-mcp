@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from src.session_attribution import (
     SESSION_ID_HEADER,
@@ -1915,7 +1916,9 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
 # session id into a display name. See src/session_attribution.py.
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 
-mcp_server: MCPServer[Any] = MCPServer(name="tts-mcp", version="0.2.0")
+# No version: the package metadata reads 0.0.1 and the release lives only in
+# git tags, so any literal here would be a wrong number reported to clients.
+mcp_server: MCPServer[Any] = MCPServer(name="tts-mcp")
 
 
 def _server_state() -> ServerState:
@@ -1923,14 +1926,18 @@ def _server_state() -> ServerState:
     return cast("ServerState", app.state.server)
 
 
-def _tool_result(call: Callable[[], BaseModel]) -> str:
-    """Run a route body and render it the way the relay did: indented JSON text.
+async def _tool_result(call: Callable[[], BaseModel]) -> str:
+    """Run a route body off the event loop and render it the way the relay did: indented JSON text.
+
+    The route bodies block (status lock, a full history rewrite in persist()),
+    so they run in the threadpool exactly as Starlette runs the sync HTTP routes;
+    inline on the loop they would stall every other MCP session and /health.
 
     An HTTPException from the route becomes a ToolError (``is_error=True``)
     carrying the same JSON error body the relay produced for a non-2xx answer.
     """
     try:
-        result = call()
+        result = await run_in_threadpool(call)
     except HTTPException as err:
         error = {"error": "http_error", "status_code": err.status_code, "response": {"detail": err.detail}}
         raise ToolError(json.dumps(error, indent=2)) from err
@@ -1945,7 +1952,7 @@ def _tool_result(call: Callable[[], BaseModel]) -> str:
     ),
     structured_output=False,
 )
-def mcp_say(
+async def mcp_say(
     voice: Annotated[str, Field(description="Voice to use for synthesis. Use get_voices to list available voices.")],
     text: Annotated[str, Field(description="Text to convert to speech.")],
     ctx: Context[Any, Any],
@@ -1985,9 +1992,10 @@ def mcp_say(
     # headers a client actually sends, which is what attribution depends on.
     logger.debug("mcp say request header names: %s", sorted(headers.keys()) if headers is not None else None)
     session_id = session_id_from_headers(headers)
-    session_name = resolve_session_name(session_id, SESSIONS_DIR) if session_id is not None else None
+    # The registry scan reads disk, so it runs off the loop like the route body.
+    session_name = await run_in_threadpool(resolve_session_name, session_id, SESSIONS_DIR) if session_id is not None else None
     if session_id is None:
-        logger.error("mcp say carried no %s header; falling back to sender", SESSION_ID_HEADER)
+        logger.warning("mcp say carried no %s header; falling back to sender", SESSION_ID_HEADER)
     attributed = attribution_label(session_name, sender)
     logger.info(
         "mcp say voice=%s engine=%s sender=%s sender_caller=%s text=%r",
@@ -1998,7 +2006,7 @@ def mcp_say(
         text[:80],
     )
     body = SayRequest(text=text, voice=voice, instruct=instruct, engine=engine, sender=attributed)
-    return _tool_result(lambda: queue_say(_server_state(), body))
+    return await _tool_result(lambda: queue_say(_server_state(), body))
 
 
 @mcp_server.tool(
@@ -2010,11 +2018,11 @@ def mcp_say(
     ),
     structured_output=False,
 )
-def mcp_pause(
+async def mcp_pause(
     message_id: Annotated[str | None, Field(description="Message ID to pause. Omit to pause whatever is playing right now.")] = None,
 ) -> str:
     """Pause the playing message, or one named message."""
-    return _tool_result(lambda: pause_messages(_server_state(), PauseRequest(message_id=message_id)))
+    return await _tool_result(lambda: pause_messages(_server_state(), PauseRequest(message_id=message_id)))
 
 
 @mcp_server.tool(
@@ -2025,11 +2033,11 @@ def mcp_pause(
     ),
     structured_output=False,
 )
-def mcp_resume(
+async def mcp_resume(
     message_id: Annotated[str | None, Field(description="Message ID to resume. Omit to resume whatever is paused right now.")] = None,
 ) -> str:
     """Resume the paused message, or one named message."""
-    return _tool_result(lambda: resume_messages(_server_state(), PauseRequest(message_id=message_id)))
+    return await _tool_result(lambda: resume_messages(_server_state(), PauseRequest(message_id=message_id)))
 
 
 @mcp_server.tool(
@@ -2043,12 +2051,12 @@ def mcp_resume(
     ),
     structured_output=False,
 )
-def mcp_cancel(
+async def mcp_cancel(
     message_id: Annotated[str | None, Field(description="Message ID to cancel. Omit to cancel whatever is playing right now.")] = None,
     all: Annotated[bool, Field(description="Cancel the playing message and drop every queued message behind it.")] = False,
 ) -> str:
     """Cancel the playing message, one named message, or the whole queue."""
-    return _tool_result(lambda: cancel_messages(_server_state(), CancelRequest(message_id=message_id, all=all)))
+    return await _tool_result(lambda: cancel_messages(_server_state(), CancelRequest(message_id=message_id, all=all)))
 
 
 @mcp_server.tool(
@@ -2060,9 +2068,9 @@ def mcp_cancel(
     ),
     structured_output=False,
 )
-def mcp_get_voices() -> str:
+async def mcp_get_voices() -> str:
     """List available voices, flat and grouped per engine."""
-    return _tool_result(lambda: list_voices(_server_state()))
+    return await _tool_result(lambda: list_voices(_server_state()))
 
 
 @mcp_server.tool(
@@ -2075,9 +2083,9 @@ def mcp_get_voices() -> str:
     ),
     structured_output=False,
 )
-def mcp_get_status(message_id: Annotated[str, Field(description="Message ID returned by the say tool.")]) -> str:
+async def mcp_get_status(message_id: Annotated[str, Field(description="Message ID returned by the say tool.")]) -> str:
     """Report one message's status."""
-    return _tool_result(lambda: message_status(_server_state(), message_id))
+    return await _tool_result(lambda: message_status(_server_state(), message_id))
 
 
 # streamable_http_app() must run before session_manager is read (the SDK builds

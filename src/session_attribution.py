@@ -12,7 +12,7 @@ The name is best-effort attribution metadata, not a required value. A miss
 degrades to the caller's own ``sender`` string. That is a deliberate, scoped
 carve-out from AGENTS.md's "fail fast — never swallow errors": a ``say`` must
 never fail because a label could not be resolved. The carve-out is not silent —
-an unresolved name is logged at error level — and the ``say`` path itself still
+an unresolved name is logged at warning level — and the ``say`` path itself still
 propagates every request failure.
 """
 
@@ -39,7 +39,7 @@ def resolve_session_name(session_id: str, sessions_dir: Path) -> str | None:
     the registry must not take attribution down for every other session.
     """
     if not sessions_dir.is_dir():
-        logger.error("session registry missing: %s", sessions_dir)
+        logger.warning("session registry missing: %s", sessions_dir)
         return None
 
     for path in sessions_dir.glob("*.json"):
@@ -56,10 +56,10 @@ def resolve_session_name(session_id: str, sessions_dir: Path) -> str | None:
         name = entry.get("name")
         if isinstance(name, str) and name.strip():
             return name.strip()
-        logger.error("session %s has a registry entry but no usable name (%s)", session_id, path)
+        logger.warning("session %s has a registry entry but no usable name (%s)", session_id, path)
         return None
 
-    logger.error("session %s has no registry entry in %s", session_id, sessions_dir)
+    logger.warning("session %s has no registry entry in %s", session_id, sessions_dir)
     return None
 
 
