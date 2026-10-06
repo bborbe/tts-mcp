@@ -86,9 +86,6 @@ data/history.tmp
 .dolt/
 *.db
 
-# MCP server (Node.js)
-mcp/node_modules/
-
 # Documentation (generated blog posts, drafts)
 docs/
 

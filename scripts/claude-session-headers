@@ -1,0 +1,27 @@
+#!/bin/sh
+# headersHelper for the tts-mcp HTTP endpoint: identify the calling Claude Code
+# session. Claude Code runs this as a child of its own `claude` process once per
+# connection, so walk up to that ancestor and read its session id from the
+# registry Claude Code keeps at ~/.claude/sessions/<pid>.json. Prints {} when no
+# claude ancestor or no registry entry is found; the server then falls back to
+# the caller's `sender`.
+pid=$PPID
+hops=0
+while [ "$pid" -gt 1 ] && [ "$hops" -lt 8 ]; do
+	comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
+	if [ "$(basename "$comm")" = "claude" ]; then
+		entry="$HOME/.claude/sessions/$pid.json"
+		i=0
+		while [ ! -s "$entry" ] && [ "$i" -lt 20 ]; do sleep 0.25; i=$((i + 1)); done
+		sid=$(sed -n 's/.*"sessionId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$entry" 2>/dev/null | head -1)
+		if [ -n "$sid" ]; then
+			printf '{"X-Claude-Code-Session-Id": "%s"}\n' "$sid"
+		else
+			printf '{}\n'
+		fi
+		exit 0
+	fi
+	pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+	hops=$((hops + 1))
+done
+printf '{}\n'

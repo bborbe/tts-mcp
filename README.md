@@ -26,22 +26,22 @@ All configuration is explicit — no hardcoded defaults, no silent fallbacks. If
 
 ## Architecture
 
-There are two independent entry paths into the system. The interactive CLI (`src/main.py`) resolves the model and voice, then starts a worker that loads the model and runs generation on the same thread. The FastAPI server (`src/server.py`) loads the model once at startup and serializes all requests through a work queue and a background audio worker (streaming or buffered per the `stream` setting). AI agents reach the server through the MCP relay (`mcp/tts-mcp.ts`), a thin stdio-to-HTTP bridge; any plain HTTP client can call the REST API directly. In both paths, inference runs on the Apple Silicon GPU via MLX (Metal), with the Voxtral model weights held in unified memory.
+There are two independent entry paths into the system. The interactive CLI (`src/main.py`) resolves the model and voice, then starts a worker that loads the model and runs generation on the same thread. The FastAPI server (`src/server.py`) loads the model once at startup and serializes all requests through a work queue and a background audio worker (streaming or buffered per the `stream` setting). AI agents reach the server's own MCP endpoint at `/mcp` (StreamableHTTP), which every session shares; any plain HTTP client can call the REST API directly. In both paths, inference runs on the Apple Silicon GPU via MLX (Metal), with the Voxtral model weights held in unified memory.
 
 ```text
 ┌───────────────────────────┐  ┌───────────────────────────┐  ┌───────────────────────────┐
 │         AI Agent          │  │        HTTP Client        │  │       Terminal User       │
 │   Claude Code / Desktop   │  │      curl / scripts       │  │         make chat         │
 └─────────────┬─────────────┘  └─────────────┬─────────────┘  └─────────────┬─────────────┘
-              │ MCP (stdio)                  │ HTTP                         │
-              ▼                              │                              ▼
-┌───────────────────────────┐                │                ┌───────────────────────────┐
-│   MCP Server (Node.js)    │                │                │     CLI · src/main.py     │
-│      mcp/tts-mcp.ts       │                │                │     interactive chat      │
-│  tools: say, get_voices,  │                │                │  model & voice selection  │
-│        get_status         │                │                │  queue text to worker     │
-└─────────────┬─────────────┘                │                └─────────────┬─────────────┘
-              │ HTTP                         │                              │ model path + text
+              │ MCP (HTTP, /mcp)             │ HTTP                         │
+              │                              │                              ▼
+              │                              │                ┌───────────────────────────┐
+              │                              │                │     CLI · src/main.py     │
+              │                              │                │     interactive chat      │
+              │                              │                │  model & voice selection  │
+              │                              │                │  queue text to worker     │
+              │                              │                └─────────────┬─────────────┘
+              │                              │                              │ model path + text
               ▼                              ▼                              │
 ┌─────────────┬──────────────────────────────┬───────────────┐              │
 │               FastAPI Server · src/server.py               │              │
@@ -108,8 +108,6 @@ There are two independent entry paths into the system. The interactive CLI (`src
 ├── scripts/                # Utility scripts
 │   ├── download-model.sh   # Interactive model downloader
 │   └── test-concurrent-say.py  # Concurrent /say load test
-├── mcp/                    # MCP server (TypeScript)
-│   └── tts-mcp.ts          # MCP relay to FastAPI server
 ├── data/
 │   └── output/             # Generated WAV files
 ├── config.yaml             # Local configuration (gitignored)
@@ -157,7 +155,7 @@ Configuration lives in a `config.yaml` file, resolved in this precedence order:
 2. `$XDG_CONFIG_HOME/tts-mcp/config.yaml` — defaults to `~/.config/tts-mcp/config.yaml`
 3. `./config.yaml` — project root (fallback)
 
-Keeping machine-local config at `~/.config/tts-mcp/config.yaml` keeps it out of the repo working tree. Both the Python server/CLI and the TypeScript MCP relay use the same order. Note: `model:`, `models_dir:`, and data paths inside the file are resolved relative to the **process working directory**, not the config file's location. Example: 
+Keeping machine-local config at `~/.config/tts-mcp/config.yaml` keeps it out of the repo working tree. The server and the CLI use the same order. Note: `model:`, `models_dir:`, and data paths inside the file are resolved relative to the **process working directory**, not the config file's location. Example: 
 
 ```yaml
 engine: voxtral
@@ -278,8 +276,8 @@ Notes:
   always opt-in.
 - **An entry the engine cannot synthesise fails at startup**, not at request time — otherwise the substitution would
   pick a voice that does not exist and the caller would get a 400 from a config that looked valid.
-- **The list is enforced server-side, at `POST /say`** — the one choke point the MCP relay, the CLI and a bare `curl`
-  all pass through. Guarding the MCP relay alone would leave a direct POST unrestricted.
+- **The list is enforced server-side, in the `say` path** — the one choke point the MCP endpoint, the CLI and a bare
+  `curl` all pass through. Guarding the MCP tool alone would leave a direct POST unrestricted.
 - **Changes need a restart.** The list is read once at startup; there is no hot reload.
 - **A top-level `allowed_voices` is rejected** — the key is per engine, so the flat `engine:`/`model:` form cannot carry
   one. Declaring it there is an error rather than a silently ignored key.
@@ -421,9 +419,9 @@ at request time rather than failing later inside the worker.
 
 `sender` is optional and names the session that produced the message (e.g. the Claude session tag). It is stored with
 the message and shown in the web UI and `/state`, so it is clear which session said what when several sessions
-interleave. A direct HTTP client controls this value. The MCP relay does not pass yours through unchanged — it resolves
-the calling Claude Code session's own name and sends that, using your value only as a fallback for a session it cannot
-resolve (see the MCP relay section below).
+interleave. A direct HTTP client controls this value. The MCP `say` tool does not use yours unchanged — it resolves
+the calling Claude Code session's own name and uses that, keeping your value only as a fallback for a session it cannot
+resolve (see [Attribution](#attribution) below).
 
 Returns `202 Accepted` with a message ID and queue position. Audio plays through the server's speakers.
 
@@ -514,9 +512,9 @@ still ends it as `cancelled`. Finished statuses expire after 1 hour.
 
 ## MCP Server
 
-The MCP server (`mcp/tts-mcp.ts`) relays between MCP clients and the FastAPI server, with one deliberate exception to
-pass-through: it attributes every `say` to the calling Claude Code session (see [Attribution](#attribution) below). It
-exposes six tools:
+The FastAPI server serves MCP itself at `/mcp` over StreamableHTTP, so every Claude Code session shares the one
+endpoint instead of spawning a relay process of its own. Each tool calls the same function as its HTTP route, so a tool
+returns exactly what its route returns. It exposes six tools:
 
 | Tool | Description |
 |------|-------------|
@@ -529,37 +527,38 @@ exposes six tools:
 
 ### Attribution
 
-Every `say` is labelled with the name of the Claude Code session that made the call. The relay resolves it once at
-startup — walk its parent-process chain to the `claude` ancestor, read that pid's entry in
-`~/.claude/sessions/<pid>.json`, take `name` — so the label follows `/rename` and needs no cooperation from the calling
-model. The tool's own `sender` argument is a fallback, used only for a session with no registry entry.
+Every `say` is labelled with the name of the Claude Code session that made the call. The server reads the session id
+from the request's `X-Claude-Code-Session-Id` header and resolves it against the registry Claude Code keeps in
+`~/.claude/sessions/*.json`, matching each entry's `sessionId` and taking its `name`. It re-reads on every call, so the
+label follows `/rename`. The tool's own `sender` argument is a fallback, used only when the header is absent or names
+no registry entry.
 
-Resolution is best-effort and cached at startup: it never throws and never delays a `say`. A miss is logged at error
-level and the utterance is spoken regardless.
+Claude Code does not send that header by itself. The config's `headersHelper` supplies it:
+`scripts/claude-session-headers` runs once per connection as a child of the session's `claude` process, walks up to that
+process, reads its `sessionId` from the registry and prints `{"X-Claude-Code-Session-Id": "<id>"}`. Without the helper
+every session's `say` is unattributed unless the caller passes `sender`.
 
-### Setup
+Resolution is best-effort: it never fails a `say`. A miss is logged at warning level and the utterance is spoken
+regardless.
 
-```bash
-cd mcp && npm install
-```
+### Usage with Claude Code
 
-### Usage with Claude Code / Claude Desktop
-
-Add to your MCP configuration:
+Point the MCP configuration at the running server — no install step and no per-session process:
 
 ```json
 {
   "mcpServers": {
     "tts": {
-      "command": "npx",
-      "args": ["tsx", "tts-mcp.ts"],
-      "cwd": "/path/to/mistral-text-to-spech/mcp"
+      "type": "http",
+      "url": "http://127.0.0.1:12000/mcp",
+      "headersHelper": "/path/to/tts-mcp/scripts/claude-session-headers"
     }
   }
 }
 ```
 
-The MCP server reads `config.yaml` from the project root to determine the server URL.
+Use `127.0.0.1` or `localhost`: the endpoint keeps the MCP SDK's DNS-rebinding protection, which refuses any other
+`Host`. The port is the server's `port` from `config.yaml`.
 
 ## Development
 
