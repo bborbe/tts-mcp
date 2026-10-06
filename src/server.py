@@ -11,14 +11,22 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import cast
+from typing import Annotated, Any, cast
 
 import numpy as np
 import pyloudnorm as pyln
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import BaseModel, Field
 
+from src.session_attribution import (
+    SESSION_ID_HEADER,
+    attribution_label,
+    resolve_session_name,
+    session_id_from_headers,
+)
 from src.tts import (
     OUTPUT_DIR,
     QWEN3,
@@ -858,8 +866,16 @@ def health() -> HealthResponse:
 @router.get("/voices")
 def voices(request: Request) -> VoicesResponse:
     """List available voices, flat and grouped per engine."""
-    state: ServerState = request.app.state.server
+    return list_voices(request.app.state.server)
 
+
+# Each route's body lives in a plain function taking the ServerState, so the
+# HTTP route and the in-server MCP tool for it run the same code. The MCP tools
+# are therefore the routes by construction, not a reimplementation of them.
+
+
+def list_voices(state: ServerState) -> VoicesResponse:
+    """List available voices, flat and grouped per engine."""
     engines: list[EngineVoices] = []
     for kind in state.registry.kinds():
         spec = state.registry.spec(kind)
@@ -888,8 +904,11 @@ def voices(request: Request) -> VoicesResponse:
 @router.post("/say", status_code=202)
 def say(request: Request, body: SayRequest) -> SayResponse:
     """Queue text for speech synthesis and playback."""
-    state: ServerState = request.app.state.server
+    return queue_say(request.app.state.server, body)
 
+
+def queue_say(state: ServerState, body: SayRequest) -> SayResponse:
+    """Queue text for speech synthesis and playback."""
     cleaned = clean_text(body.text)
     if not cleaned:
         raise HTTPException(status_code=422, detail="Text is empty after cleaning")
@@ -973,9 +992,11 @@ def cancel(request: Request, body: CancelRequest | None = None) -> CancelRespons
     before it is ever synthesized. With ``all`` the playing message is stopped
     and everything queued behind it is dropped.
     """
-    state: ServerState = request.app.state.server
-    args = body if body is not None else CancelRequest()
+    return cancel_messages(request.app.state.server, body if body is not None else CancelRequest())
 
+
+def cancel_messages(state: ServerState, args: CancelRequest) -> CancelResponse:
+    """Stop the playing message, one named message, or the whole queue — see POST /cancel."""
     if args.message_id is not None:
         with state.status_lock:
             known = args.message_id in state.statuses
@@ -996,9 +1017,11 @@ def pause(request: Request, body: PauseRequest | None = None) -> PauseResponse:
     only that message is paused. A paused message is still cancellable (the
     pause never blocks a cancel). Pausing nothing is not an error.
     """
-    state: ServerState = request.app.state.server
-    args = body if body is not None else PauseRequest()
+    return pause_messages(request.app.state.server, body if body is not None else PauseRequest())
 
+
+def pause_messages(state: ServerState, args: PauseRequest) -> PauseResponse:
+    """Hold the playing message, or one named message — see POST /pause."""
     if args.message_id is not None:
         with state.status_lock:
             known = args.message_id in state.statuses
@@ -1018,9 +1041,11 @@ def resume(request: Request, body: PauseRequest | None = None) -> PauseResponse:
     With no body the message currently paused is resumed. With ``message_id``
     only that message is resumed. Resuming nothing is not an error.
     """
-    state: ServerState = request.app.state.server
-    args = body if body is not None else PauseRequest()
+    return resume_messages(request.app.state.server, body if body is not None else PauseRequest())
 
+
+def resume_messages(state: ServerState, args: PauseRequest) -> PauseResponse:
+    """Continue the paused message, or one named message — see POST /resume."""
     if args.message_id is not None:
         with state.status_lock:
             known = args.message_id in state.statuses
@@ -1082,8 +1107,11 @@ def state_endpoint(request: Request) -> StateResponse:
 @router.get("/status/{message_id}")
 def status(request: Request, message_id: str) -> StatusResponse:
     """Check the status of a queued/playing/completed message."""
-    state: ServerState = request.app.state.server
+    return message_status(request.app.state.server, message_id)
 
+
+def message_status(state: ServerState, message_id: str) -> StatusResponse:
+    """Check the status of a queued/playing/completed message."""
     state.evict_expired()
 
     with state.status_lock:
@@ -1874,6 +1902,191 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
     return state
 
 
+# --- In-server MCP endpoint -------------------------------------------------
+#
+# MCP is served from this process at /mcp over StreamableHTTP, replacing the
+# per-session stdio relay that used to sit in mcp/tts-mcp.ts. Every tool calls
+# the same function its HTTP route calls, so tool behaviour is the route's by
+# construction. Errors keep the relay's wire shape — a JSON body with
+# ``error: "http_error"``, the status code and the route's response — so a
+# caller that read the relay's errors reads these unchanged.
+
+# Where Claude Code keeps its session registry, read to turn the request's
+# session id into a display name. See src/session_attribution.py.
+SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+
+mcp_server: MCPServer[Any] = MCPServer(name="tts-mcp", version="0.2.0")
+
+
+def _server_state() -> ServerState:
+    """The live ServerState, set by lifespan before any request is served."""
+    return cast("ServerState", app.state.server)
+
+
+def _tool_result(call: Callable[[], BaseModel]) -> str:
+    """Run a route body and render it the way the relay did: indented JSON text.
+
+    An HTTPException from the route becomes a ToolError (``is_error=True``)
+    carrying the same JSON error body the relay produced for a non-2xx answer.
+    """
+    try:
+        result = call()
+    except HTTPException as err:
+        error = {"error": "http_error", "status_code": err.status_code, "response": {"detail": err.detail}}
+        raise ToolError(json.dumps(error, indent=2)) from err
+    return json.dumps(result.model_dump(), indent=2)
+
+
+@mcp_server.tool(
+    name="say",
+    description=(
+        "Queue text for speech synthesis and playback. Sends text to the TTS server which generates audio "
+        "and plays it through speakers. Returns a message ID for status tracking."
+    ),
+    structured_output=False,
+)
+def mcp_say(
+    voice: Annotated[str, Field(description="Voice to use for synthesis. Use get_voices to list available voices.")],
+    text: Annotated[str, Field(description="Text to convert to speech.")],
+    ctx: Context[Any, Any],
+    instruct: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional emotion/style instruction, e.g. 'Very happy and excited.'. Only supported by the qwen3 "
+                "engine; requests pairing it with a voxtral voice are rejected."
+            )
+        ),
+    ] = None,
+    engine: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Engine to synthesize with, e.g. 'qwen3' or 'voxtral'. Omit to use the server default. The voice "
+                "must belong to this engine — see get_voices for the per-engine grouping. The first request for an "
+                "engine loads its model, which can take ~15-20s; later requests are immediate."
+            )
+        ),
+    ] = None,
+    sender: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Fallback label, used only when the server cannot resolve the calling Claude Code session's name. "
+                "The resolved session name normally wins, so this value is kept as secondary detail rather than "
+                "shown as the label."
+            )
+        ),
+    ] = None,
+) -> str:
+    """Queue text for speech; the label is the calling session's name, ``sender`` only a fallback."""
+    headers = ctx.headers
+    # Names only, never values: this line exists to show which identity
+    # headers a client actually sends, which is what attribution depends on.
+    logger.debug("mcp say request header names: %s", sorted(headers.keys()) if headers is not None else None)
+    session_id = session_id_from_headers(headers)
+    session_name = resolve_session_name(session_id, SESSIONS_DIR) if session_id is not None else None
+    if session_id is None:
+        logger.error("mcp say carried no %s header; falling back to sender", SESSION_ID_HEADER)
+    attributed = attribution_label(session_name, sender)
+    logger.info(
+        "mcp say voice=%s engine=%s sender=%s sender_caller=%s text=%r",
+        voice,
+        engine or "default",
+        attributed,
+        sender,
+        text[:80],
+    )
+    body = SayRequest(text=text, voice=voice, instruct=instruct, engine=engine, sender=attributed)
+    return _tool_result(lambda: queue_say(_server_state(), body))
+
+
+@mcp_server.tool(
+    name="pause",
+    description=(
+        "Pause the speech that is currently playing; it resumes from the same point when resume is called. "
+        "Call with no arguments to pause whatever is playing right now, or pass message_id to pause one "
+        "specific message."
+    ),
+    structured_output=False,
+)
+def mcp_pause(
+    message_id: Annotated[str | None, Field(description="Message ID to pause. Omit to pause whatever is playing right now.")] = None,
+) -> str:
+    """Pause the playing message, or one named message."""
+    return _tool_result(lambda: pause_messages(_server_state(), PauseRequest(message_id=message_id)))
+
+
+@mcp_server.tool(
+    name="resume",
+    description=(
+        "Resume speech that was paused with pause, continuing from exactly where it stopped. Call with no "
+        "arguments to resume whatever is paused right now, or pass message_id to resume one specific message."
+    ),
+    structured_output=False,
+)
+def mcp_resume(
+    message_id: Annotated[str | None, Field(description="Message ID to resume. Omit to resume whatever is paused right now.")] = None,
+) -> str:
+    """Resume the paused message, or one named message."""
+    return _tool_result(lambda: resume_messages(_server_state(), PauseRequest(message_id=message_id)))
+
+
+@mcp_server.tool(
+    name="cancel",
+    description=(
+        "Stop speech that is currently playing and let the next queued message start immediately. Call with no "
+        "arguments when the user asks to skip, stop, or cut short what is being said. Pass message_id to cancel "
+        "one specific message (if it has not started yet it is dropped without being synthesized at all), or "
+        "all=true to stop the current message and drop the whole queue behind it. Returns the cancelled message "
+        "IDs and how many remain queued."
+    ),
+    structured_output=False,
+)
+def mcp_cancel(
+    message_id: Annotated[str | None, Field(description="Message ID to cancel. Omit to cancel whatever is playing right now.")] = None,
+    all: Annotated[bool, Field(description="Cancel the playing message and drop every queued message behind it.")] = False,
+) -> str:
+    """Cancel the playing message, one named message, or the whole queue."""
+    return _tool_result(lambda: cancel_messages(_server_state(), CancelRequest(message_id=message_id, all=all)))
+
+
+@mcp_server.tool(
+    name="get_voices",
+    description=(
+        "List all available TTS voices and the default voice from the speech server. The response also groups "
+        "voices per engine, with each engine's language, whether it supports instruct, and whether its model is "
+        "already loaded."
+    ),
+    structured_output=False,
+)
+def mcp_get_voices() -> str:
+    """List available voices, flat and grouped per engine."""
+    return _tool_result(lambda: list_voices(_server_state()))
+
+
+@mcp_server.tool(
+    name="get_status",
+    description=(
+        "Check status of a speech synthesis request. Returns status (queued/loading/playing/paused/completed/"
+        "error), the engine used, original text, audio file path, sender, and error details. 'loading' means the "
+        "request is waiting on its engine's model to load; 'paused' means playback was paused with the pause tool "
+        "and will resume from the same point."
+    ),
+    structured_output=False,
+)
+def mcp_get_status(message_id: Annotated[str, Field(description="Message ID returned by the say tool.")]) -> str:
+    """Report one message's status."""
+    return _tool_result(lambda: message_status(_server_state(), message_id))
+
+
+# streamable_http_app() must run before session_manager is read (the SDK builds
+# the manager there). The path is the full /mcp because the sub-app is mounted
+# at the root: mounting it *at* /mcp would make the bare /mcp path redirect to
+# /mcp/, and a client POSTing to /mcp does not follow that.
+mcp_app = mcp_server.streamable_http_app(streamable_http_path="/mcp")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Start the audio worker, wait for its in-thread model load, then shut it down on exit.
@@ -1906,7 +2119,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         stop_event=threading.Event(),
     )
 
-    yield
+    # The MCP session manager runs only after the model load above has
+    # succeeded, so /mcp never accepts a session the server cannot serve, and a
+    # model-load failure still aborts startup before anything is listening.
+    # Starlette does not run a mounted sub-app's lifespan, so it is entered here.
+    async with mcp_server.session_manager.run():
+        yield
 
     state.work_queue.put(None)
     worker.join(timeout=10)
@@ -1914,6 +2132,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(router)
+# Mounted last and at the root so every route above matches first; the MCP
+# sub-app only answers /mcp.
+app.mount("/", mcp_app)
 
 
 if __name__ == "__main__":

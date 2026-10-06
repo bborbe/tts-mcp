@@ -16,6 +16,7 @@ dependencies = [
     "scipy>=1.11.0",
     "uvicorn>=0.34.0",
     "mistral-common[audio]>=1.11.3",
+    "mcp>=2.3.0",
 ]
 
 [build-system]

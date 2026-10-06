@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: Serve MCP from the FastAPI server at `/mcp` (StreamableHTTP) with the same six tools as the stdio relay (`say`, `get_status`, `get_voices`, `pause`, `resume`, `cancel`), so sessions can share one endpoint instead of spawning a relay each. Each tool calls the same function as its HTTP route. `say` attributes the utterance to the calling session by resolving the `X-Claude-Code-Session-Id` header against `~/.claude/sessions`, falling back to `sender`. The stdio relay in `mcp/` is unchanged.
+
 ## v0.20.0
 
 - feat: **back-to-back messages keep the music ducked instead of letting it rise between sentences.** The client now defers the release by a new required `duck.hold_ms` (default `1000` in `config.yaml`, max `60000`): `unduck` only schedules it, and a `duck` inside the window cancels it. With `stream: true` the next message spends a few seconds generating before it plays, and v0.19.0 brought the music back up in that gap. The playback thread no longer waits on the fade-up either, so a slow release no longer adds silence between messages. **Configs with `duck.enabled: true` must add `hold_ms`**, or the server refuses to start.
