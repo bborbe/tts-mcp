@@ -105,8 +105,10 @@ There are two independent entry paths into the system. The interactive CLI (`src
 │   ├── test_tts.py
 │   └── architecture/       # Architecture import rule tests
 ├── scripts/                # Utility scripts
+│   ├── claude-session-headers  # headersHelper: session id header for /mcp
 │   ├── download-model.sh   # Interactive model downloader
-│   └── test-concurrent-say.py  # Concurrent /say load test
+│   ├── test-concurrent-say.py  # Concurrent /say load test
+│   └── tts-skip, tts-pause, tts-resume  # Playback control from the shell
 ├── data/
 │   └── output/             # Generated WAV files
 ├── config.yaml             # Local configuration (gitignored)
