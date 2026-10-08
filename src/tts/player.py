@@ -301,6 +301,12 @@ class AudioPlayer:
                         # audio back down on a voice that is about to stop.
                         return False
                     pause.wait(WRITE_SLICE_SECONDS)
+                # Bounded stall, accepted: when the zero-delay release is still
+                # mid-send, this waits on the ducker lock for the remainder of
+                # the helper's fade_up ramp (up to ~fade_up_ms) before audio
+                # resumes. Clearing _ducked before that send instead would let
+                # this duck overtake the in-flight unduck and leave the audio
+                # up — the wait is what keeps the two commands ordered.
                 self._ducker.duck()
             stream.write(frames[start : start + self._slice_frames])
         return True

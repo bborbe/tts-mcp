@@ -94,6 +94,7 @@ class TestNullDucker:
         ducker = NullDucker()
         ducker.duck()
         ducker.unduck()
+        ducker.unduck_now()
 
 
 class TestSocketDucker:
@@ -120,6 +121,20 @@ class TestSocketDucker:
             sock = mock_socket.return_value.__enter__.return_value
             ducker.duck()
             ducker.unduck()
+            self._wait_for_release(ducker)
+
+        assert sock.sendall.call_args_list[-1].args == (b"unduck",)
+        assert sock.sendall.call_count == 2
+
+    def test_unduck_now_sends_the_command_without_the_hold(self) -> None:
+        # The hold bridges back-to-back utterances; a pause is not that gap, so
+        # the release must not wait it out. A hold far longer than the test
+        # would otherwise pass only if unduck_now skipped it.
+        ducker = SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=150, hold_ms=60000))
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck_now()
             self._wait_for_release(ducker)
 
         assert sock.sendall.call_args_list[-1].args == (b"unduck",)
@@ -339,8 +354,10 @@ class TestPlayerDuckPairing:
         mock_sd.OutputStream.return_value = mock_stream
         player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
 
+        parked: list[bool] = []
+
         def observe_then_resume() -> None:
-            assert pause.wait(timeout=5), "the player never parked on the pause"
+            parked.append(pause.wait(timeout=5))
             time.sleep(0.05)
             during_pause.extend(events)
             pause.clear()
@@ -351,6 +368,7 @@ class TestPlayerDuckPairing:
         controller.join(timeout=5)
         player.close()
 
+        assert parked == [True], "the player never parked on the pause"
         assert "unduck_now" in during_pause, f"pause left the duck applied: {during_pause}"
         assert events.count("duck") == 2, f"resume did not re-duck: {events}"
         assert events.count("unduck") == 1
@@ -378,8 +396,10 @@ class TestPlayerDuckPairing:
         mock_sd.OutputStream.return_value = mock_stream
         player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
 
+        parked: list[bool] = []
+
         def pause_then_cancel() -> None:
-            assert pause.wait(timeout=5), "the player never parked on the pause"
+            parked.append(pause.wait(timeout=5))
             time.sleep(0.05)
             cancel.set()
 
@@ -398,6 +418,7 @@ class TestPlayerDuckPairing:
         controller.join(timeout=5)
         player.close()
 
+        assert parked == [True], "the player never parked on the pause"
         assert cancelled == [True]
         assert "unduck_now" in events
         assert events.count("duck") == 1, f"cancel re-ducked the audio: {events}"
