@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -241,6 +242,7 @@ class TestPlayerDuckPairing:
         ducker = MagicMock()
         ducker.duck.side_effect = lambda: events.append("duck")
         ducker.unduck.side_effect = lambda: events.append("unduck")
+        ducker.unduck_now.side_effect = lambda: events.append("unduck_now")
         return ducker
 
     @patch("src.tts.player.sd")
@@ -309,3 +311,94 @@ class TestPlayerDuckPairing:
 
         assert len(errors) == 1
         assert events == ["duck", "unduck"]
+
+    @patch("src.tts.player.sd")
+    def test_releases_the_duck_while_paused_and_re_ducks_on_resume(self, mock_sd: MagicMock) -> None:
+        """A paused voice is not audible, so other audio must not stay ducked.
+
+        Pause parks the player thread inside the job, so the ``finally`` that
+        releases the duck never runs — the release has to happen where the
+        player actually waits.
+        """
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        pause = threading.Event()
+        during_pause: list[str] = []
+        writes = 0
+
+        def on_write(_frames: object) -> None:
+            nonlocal writes
+            writes += 1
+            events.append("write")
+            if writes == 3:
+                pause.set()
+
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = on_write
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        def observe_then_resume() -> None:
+            assert pause.wait(timeout=5), "the player never parked on the pause"
+            time.sleep(0.05)
+            during_pause.extend(events)
+            pause.clear()
+
+        controller = threading.Thread(target=observe_then_resume, daemon=True)
+        controller.start()
+        player.submit(PlaybackJob(chunks=[np.ones(100, dtype=np.float32)] * 40, output_path=None, pause=pause))
+        controller.join(timeout=5)
+        player.close()
+
+        assert "unduck_now" in during_pause, f"pause left the duck applied: {during_pause}"
+        assert events.count("duck") == 2, f"resume did not re-duck: {events}"
+        assert events.count("unduck") == 1
+        assert events[-1] == "unduck"
+
+    @patch("src.tts.player.sd")
+    def test_cancel_while_paused_does_not_re_duck(self, mock_sd: MagicMock) -> None:
+        """Leaving the pause by cancelling must not put the duck back on."""
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        pause = threading.Event()
+        cancel = threading.Event()
+        writes = 0
+
+        def on_write(_frames: object) -> None:
+            nonlocal writes
+            writes += 1
+            events.append("write")
+            if writes == 3:
+                pause.set()
+
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = on_write
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        def pause_then_cancel() -> None:
+            assert pause.wait(timeout=5), "the player never parked on the pause"
+            time.sleep(0.05)
+            cancel.set()
+
+        cancelled: list[bool] = []
+        controller = threading.Thread(target=pause_then_cancel, daemon=True)
+        controller.start()
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 40,
+                output_path=None,
+                on_cancel=lambda: cancelled.append(True),
+                cancel=cancel,
+                pause=pause,
+            )
+        )
+        controller.join(timeout=5)
+        player.close()
+
+        assert cancelled == [True]
+        assert "unduck_now" in events
+        assert events.count("duck") == 1, f"cancel re-ducked the audio: {events}"
+        assert events[-1] == "unduck"

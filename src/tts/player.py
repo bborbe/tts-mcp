@@ -271,6 +271,14 @@ class AudioPlayer:
         needed. ``cancel`` is re-checked inside the pause wait, so pausing never
         delays a cancel.
 
+        Pausing also releases the duck, and resuming re-applies it. The pause
+        wait happens *inside* the job, so ``_run``'s ``finally`` — which releases
+        the duck on every other exit path — cannot run until the pause ends. A
+        paused voice is not audible, so leaving the duck on for the whole pause
+        would keep other applications quiet for no reason. The release is
+        immediate (``unduck_now``): the hold window bridges back-to-back
+        utterances, and a pause is not that gap.
+
         Args:
             stream: Warm output stream to write to.
             chunk: Audio samples for this chunk.
@@ -284,10 +292,16 @@ class AudioPlayer:
         for start in range(0, len(frames), self._slice_frames):
             if cancel is not None and cancel.is_set():
                 return False
-            while pause is not None and pause.is_set():
-                if cancel is not None and cancel.is_set():
-                    return False
-                pause.wait(WRITE_SLICE_SECONDS)
+            if pause is not None and pause.is_set():
+                self._ducker.unduck_now()
+                while pause.is_set():
+                    if cancel is not None and cancel.is_set():
+                        # Cancelling out of a pause is still a cancel, so the
+                        # duck stays released — re-ducking here would put the
+                        # audio back down on a voice that is about to stop.
+                        return False
+                    pause.wait(WRITE_SLICE_SECONDS)
+                self._ducker.duck()
             stream.write(frames[start : start + self._slice_frames])
         return True
 
