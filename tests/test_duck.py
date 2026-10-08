@@ -140,6 +140,23 @@ class TestSocketDucker:
         assert sock.sendall.call_args_list[-1].args == (b"unduck",)
         assert sock.sendall.call_count == 2
 
+    def test_duck_after_unduck_now_leaves_the_audio_ducked(self) -> None:
+        # A resume landing on a pending zero-delay release must not leave the
+        # audio up — the mirror of the bug this feature fixes. Whichever order
+        # the two commands land in, the duck is last: either duck() cancels the
+        # timer before it fires, or it blocks on the lock until _release_now has
+        # finished and then sends its own duck.
+        ducker = self._ducker()
+        duck_command = f"duck 0.25 100 150 {os.getpid()}".encode()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck_now()
+            ducker.duck()
+
+        assert sock.sendall.call_args_list[-1].args == (duck_command,)
+        assert ducker._ducked is True
+
     def test_unduck_without_a_duck_sends_nothing(self) -> None:
         with patch("src.tts.duck.socket.socket") as mock_socket:
             sock = mock_socket.return_value.__enter__.return_value
@@ -356,9 +373,15 @@ class TestPlayerDuckPairing:
 
         parked: list[bool] = []
 
+        def wait_for_event(name: str, timeout: float = 5.0) -> None:
+            """Wait for a recorded ducker event, so the test needs no fixed sleep."""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and name not in events:
+                time.sleep(0.005)
+
         def observe_then_resume() -> None:
             parked.append(pause.wait(timeout=5))
-            time.sleep(0.05)
+            wait_for_event("unduck_now")
             during_pause.extend(events)
             pause.clear()
 
@@ -398,9 +421,15 @@ class TestPlayerDuckPairing:
 
         parked: list[bool] = []
 
+        def wait_for_event(name: str, timeout: float = 5.0) -> None:
+            """Wait for a recorded ducker event, so the test needs no fixed sleep."""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and name not in events:
+                time.sleep(0.005)
+
         def pause_then_cancel() -> None:
             parked.append(pause.wait(timeout=5))
-            time.sleep(0.05)
+            wait_for_event("unduck_now")
             cancel.set()
 
         cancelled: list[bool] = []
