@@ -23,6 +23,7 @@ from src.tts import (
     load_config,
     make_output_path,
     simplify_punctuation,
+    speed_from_config,
 )
 
 
@@ -53,6 +54,7 @@ class CliConfig:
     stream: bool
     streaming_interval: float
     streaming_warmup_seconds: float
+    speed: float
     normalization: NormalizationSettings
 
 
@@ -362,6 +364,7 @@ def load_cli_config() -> CliConfig:
         stream=bool(_require(config, "stream")),
         streaming_interval=float(cast(float, _require(config, "streaming_interval"))),
         streaming_warmup_seconds=float(cast(float, _require(config, "streaming_warmup_seconds"))),
+        speed=speed_from_config(config),
         normalization=normalization,
     )
 
@@ -406,6 +409,7 @@ def main() -> None:
         stream=cfg.stream,
         streaming_interval=cfg.streaming_interval,
         streaming_warmup_seconds=cfg.streaming_warmup_seconds,
+        speed=cfg.speed,
     )
 
     worker = threading.Thread(

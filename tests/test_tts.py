@@ -3,6 +3,7 @@
 import queue
 import threading
 import time
+import wave
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -775,6 +776,95 @@ class TestAudioPlayerStreaming:
 
         assert len(errors) == 1
         assert "device lost" in str(errors[0])
+
+
+class TestAudioPlayerSpeed:
+    """Tests for the playback speed applied by the AudioPlayer.
+
+    These drive the player with synthetic audio rather than a model, so the
+    length ratio they assert is the player's own doing and not the TTS model's
+    run-to-run variance.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stable_default_device(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.tts.default_output_device_id", lambda: 1)
+
+    @staticmethod
+    def _tone(samples: int, sample_rate: int = 24000) -> np.ndarray:
+        t = np.arange(samples, dtype=np.float32) / sample_rate
+        return np.sin(2.0 * np.pi * 200.0 * t).astype(np.float32)
+
+    @staticmethod
+    def _written_samples(output_path: Path) -> int:
+        with wave.open(str(output_path)) as wf:
+            return int(wf.getnframes())
+
+    @patch("src.tts.player.sd")
+    def test_buffered_playback_is_stretched(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_sd.OutputStream.return_value = MagicMock()
+        player = AudioPlayer(sample_rate=24000, lead_silence_ms=0, speed=1.5)
+
+        output_path = tmp_path / "buffered.wav"
+        chunks = list(np.array_split(self._tone(24000), 4))
+        player.submit(PlaybackJob(chunks=chunks, output_path=output_path))
+        player.close()
+
+        assert self._written_samples(output_path) == pytest.approx(24000 / 1.5, rel=0.05)
+
+    @patch("src.tts.player.sd")
+    def test_streaming_playback_is_stretched(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_sd.OutputStream.return_value = MagicMock()
+        player = AudioPlayer(sample_rate=24000, lead_silence_ms=0, speed=1.5)
+
+        source: queue.Queue[np.ndarray | None] = queue.Queue()
+        for chunk in np.array_split(self._tone(24000), 10):
+            source.put(chunk)
+        source.put(None)
+
+        output_path = tmp_path / "streamed.wav"
+        player.submit_stream(StreamingPlaybackJob(chunk_source=source, output_path=output_path))
+        player.close()
+
+        assert self._written_samples(output_path) == pytest.approx(24000 / 1.5, rel=0.05)
+
+    @patch("src.tts.player.sd")
+    def test_streaming_and_buffered_agree_on_length(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        """Both playback paths must stretch the same audio to the same length."""
+        mock_sd.OutputStream.return_value = MagicMock()
+        tone = self._tone(24000)
+
+        buffered_path = tmp_path / "buffered.wav"
+        player = AudioPlayer(sample_rate=24000, lead_silence_ms=0, speed=1.5)
+        player.submit(PlaybackJob(chunks=list(np.array_split(tone, 4)), output_path=buffered_path))
+        player.close()
+
+        streamed_path = tmp_path / "streamed.wav"
+        player = AudioPlayer(sample_rate=24000, lead_silence_ms=0, speed=1.5)
+        source: queue.Queue[np.ndarray | None] = queue.Queue()
+        for chunk in np.array_split(tone, 10):
+            source.put(chunk)
+        source.put(None)
+        player.submit_stream(StreamingPlaybackJob(chunk_source=source, output_path=streamed_path))
+        player.close()
+
+        assert self._written_samples(buffered_path) == pytest.approx(self._written_samples(streamed_path), rel=0.02)
+
+    @patch("src.tts.player.sd")
+    def test_speed_one_leaves_audio_untouched(self, mock_sd: MagicMock, tmp_path: Path) -> None:
+        mock_sd.OutputStream.return_value = MagicMock()
+        player = AudioPlayer(sample_rate=24000, lead_silence_ms=0, speed=1.0)
+
+        output_path = tmp_path / "normal.wav"
+        chunks = list(np.array_split(self._tone(24000), 4))
+        player.submit(PlaybackJob(chunks=chunks, output_path=output_path))
+        player.close()
+
+        assert self._written_samples(output_path) == 24000
+
+    def test_out_of_range_speed_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="speed must be between"):
+            AudioPlayer(sample_rate=24000, lead_silence_ms=0, speed=99.0)
 
 
 class TestPlayChunks:

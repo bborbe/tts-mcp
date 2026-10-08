@@ -14,6 +14,7 @@ import sounddevice as sd
 
 from src.tts.duck import Ducker, NullDucker
 from src.tts.protocols import AudioOutputStream
+from src.tts.timestretch import MAX_SPEED, MIN_SPEED, TimeStretcher, stretch
 
 WRITE_SLICE_SECONDS: float = 0.1
 """Audio written to the output stream per blocking write.
@@ -176,6 +177,7 @@ class AudioPlayer:
         sample_rate: int,
         lead_silence_ms: int,
         ducker: Ducker | None = None,
+        speed: float = 1.0,
     ) -> None:
         """Initialize the persistent audio player.
 
@@ -184,16 +186,24 @@ class AudioPlayer:
             lead_silence_ms: Silence written after each stream open/reopen.
             ducker: Lowers other apps' audio around each utterance. Defaults to
                 a no-op ducker, so playback is unaffected when ducking is off.
+            speed: Playback speed. 1.0 (the default) plays as generated. Other
+                values are applied by a pitch-preserving time-stretch, so a
+                faster voice does not turn into a chipmunk.
 
         Raises:
-            ValueError: If lead_silence_ms is negative.
+            ValueError: If lead_silence_ms is negative, or speed is outside the
+                range the time-stretcher supports.
         """
         if lead_silence_ms < 0:
             msg = f"lead_silence_ms must be >= 0, got {lead_silence_ms}"
             raise ValueError(msg)
+        if not MIN_SPEED <= speed <= MAX_SPEED:
+            msg = f"speed must be between {MIN_SPEED} and {MAX_SPEED}, got {speed}"
+            raise ValueError(msg)
 
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
+        self._speed = speed
         self._ducker: Ducker = ducker if ducker is not None else NullDucker()
         self._slice_frames = max(1, int(sample_rate * WRITE_SLICE_SECONDS))
         self._jobs: queue.Queue[PlaybackJob | StreamingPlaybackJob | None] = queue.Queue()
@@ -250,6 +260,62 @@ class AudioPlayer:
         if stream is not None:
             return stream
         return self._open_stream()
+
+    def _new_stretcher(self) -> TimeStretcher | None:
+        """Return a time-stretcher for one utterance, or None when speed is 1.0.
+
+        A fresh instance per utterance, because the stretcher's overlap-add
+        state is meant to carry across the chunks of one utterance and never
+        across two — sharing one would smear the seam between them.
+        """
+        if self._speed == 1.0:
+            return None
+        return TimeStretcher(self._speed)
+
+    def _stretched(self, chunks: list[np.ndarray]) -> list[np.ndarray]:
+        """Apply the configured playback speed to a fully generated utterance.
+
+        The buffered path already holds the whole utterance, so it is stretched
+        in one pass and returned as a single chunk. Saving and playback both use
+        the result, so the WAV on disk matches what was heard.
+        """
+        if self._speed == 1.0 or not chunks:
+            return chunks
+        return [stretch(np.concatenate(chunks), self._speed)]
+
+    def _stretch_stream_chunk(self, stretcher: TimeStretcher | None, chunk: np.ndarray) -> np.ndarray | None:
+        """Stretch one streamed chunk.
+
+        Returns:
+            The stretched samples, or None when nothing is ready to play yet —
+            the stretcher buffers input until it can fill a frame, so an empty
+            result is normal rather than an error.
+        """
+        if stretcher is None:
+            return chunk
+        stretched = stretcher.feed(chunk)
+        return stretched if len(stretched) > 0 else None
+
+    def _flush_stretcher(
+        self,
+        stream: AudioOutputStream,
+        stretcher: TimeStretcher,
+        job: StreamingPlaybackJob,
+        collected: list[np.ndarray],
+    ) -> bool:
+        """Write the stretcher's final samples once the input has ended.
+
+        The last frames only become buildable when the stretcher knows the
+        utterance is over, so they are written here rather than in the chunk
+        loop.
+
+        Returns:
+            True when the tail was written, False when a cancel interrupted it.
+        """
+        tail = stretcher.flush()
+        if len(tail) == 0:
+            return True
+        return self._write_and_collect(stream, tail, job, collected)
 
     def _write_chunk(
         self,
@@ -313,6 +379,31 @@ class AudioPlayer:
             stream.write(frames[start : start + self._slice_frames])
         return True
 
+    def _write_and_collect(
+        self,
+        stream: AudioOutputStream,
+        chunk: np.ndarray,
+        job: PlaybackJob | StreamingPlaybackJob,
+        collected: list[np.ndarray],
+    ) -> bool:
+        """Write one chunk to the output stream and record it for saving.
+
+        Args:
+            stream: Warm output stream to write to.
+            chunk: Audio samples for this chunk.
+            job: The job being played, for its cancel and pause events.
+            collected: Accumulates the chunks that were actually played, so the
+                saved WAV holds what the listener heard and not what a cancel cut off.
+
+        Returns:
+            True when the chunk was written, False when a cancel interrupted it.
+        """
+        if not self._write_chunk(stream, chunk, job.cancel, job.pause):
+            return False
+        if job.output_path is not None:
+            collected.append(chunk)
+        return True
+
     def _finish_cancelled(self, job: PlaybackJob | StreamingPlaybackJob) -> None:
         """Report a cancelled job through its terminal callback.
 
@@ -341,13 +432,13 @@ class AudioPlayer:
         """
         try:
             stream = self._ensure_stream(stream)
-            for chunk in job.chunks:
+            chunks = self._stretched(job.chunks)
+            for chunk in chunks:
                 if not self._write_chunk(stream, chunk, job.cancel, job.pause):
                     self._finish_cancelled(job)
                     return stream
             if job.output_path is not None:
-                audio = np.concatenate(job.chunks)
-                save_audio(audio, job.output_path, self._sample_rate)
+                save_audio(np.concatenate(chunks), job.output_path, self._sample_rate)
             if job.on_complete is not None:
                 job.on_complete(job.output_path)
             return stream
@@ -364,25 +455,36 @@ class AudioPlayer:
         producer: the generation thread's remaining put() calls just accumulate in
         an abandoned queue that is garbage-collected.
 
+        When a speed other than 1.0 is configured, each chunk passes through a
+        time-stretcher before it is written, and the tail is flushed once the
+        sentinel arrives. The stretcher keeps the streaming path intact: it
+        returns output as soon as its frame grid allows, so playback still
+        starts long before the utterance has finished generating.
+
         Returns the stream to reuse for the next job, or None if it was closed due
         to an error (the next job reopens it).
         """
         try:
             stream = self._ensure_stream(stream)
+            stretcher = self._new_stretcher()
             collected: list[np.ndarray] = []
             while True:
                 chunk = job.chunk_source.get()
                 if chunk is None:
                     break
-                if not self._write_chunk(stream, chunk, job.cancel, job.pause):
+                chunk = self._stretch_stream_chunk(stretcher, chunk)
+                if chunk is None:
+                    continue
+                if not self._write_and_collect(stream, chunk, job, collected):
                     self._finish_cancelled(job)
                     return stream
-                if job.output_path is not None:
-                    collected.append(chunk)
             # The producer sends the sentinel as soon as it sees the same cancel
             # event, so the loop can also end on a cancel rather than on a
             # finished utterance — that is still a cancellation, not a completion.
             if job.cancel is not None and job.cancel.is_set():
+                self._finish_cancelled(job)
+                return stream
+            if stretcher is not None and not self._flush_stretcher(stream, stretcher, job, collected):
                 self._finish_cancelled(job)
                 return stream
             if job.output_path is not None and collected:

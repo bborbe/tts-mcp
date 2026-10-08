@@ -173,6 +173,7 @@ normalize_audio: true
 target_lufs: -20.0
 true_peak_ceiling_db: -1.0
 min_duration_seconds: 0.5
+speed: 1.0
 host: 0.0.0.0
 port: 12000
 ```
@@ -197,6 +198,7 @@ port: 12000
 | `target_lufs` | Target integrated loudness in LUFS when `normalize_audio` is enabled (e.g. `-20.0` for podcast mid) |
 | `true_peak_ceiling_db` | Maximum allowed true peak in dBFS after gain is applied (e.g. `-1.0`); measured via 4x oversampling |
 | `min_duration_seconds` | Utterances shorter than this are passed through unchanged (LUFS gating needs ~0.4s) |
+| `speed` | Playback speed (optional, default `1.0`). Other values are applied by a pitch-preserving time-stretch — see below |
 | `host` | Server listen address |
 | `port` | Server listen port |
 
@@ -310,6 +312,29 @@ utterance-level loudness normalization following ITU-R BS.1770-4 (the EBU R128 s
 - Utterances shorter than `min_duration_seconds` and fully silent utterances are passed through unchanged.
 - The same normalized audio is used for both speaker playback and the saved WAV file, so there is no drift between
   what you hear and what is written to disk.
+
+### Playback speed
+
+Set `speed` to play utterances faster or slower than they were generated. The key is optional: without it the audio
+plays exactly as generated, so an existing config is unaffected.
+
+```yaml
+speed: 1.5   # 1.5x faster
+```
+
+Speed is applied by a **pitch-preserving time-stretch** (WSOLA, in `src/tts/timestretch.py`), not by resampling. That
+distinction is the point: resampling to 1.5x also raises the pitch by 1.5x, which turns a voice into a chipmunk. The
+time-stretch rebuilds the waveform from overlapping frames and searches each frame for the position that best
+continues the audio already emitted, so the duration changes and the pitch does not.
+
+- **Range:** `0.25` to `4.0`. Outside it the output degenerates into audible repetition or skipping, so an
+  out-of-range value is rejected at startup rather than played. Quality is best between `0.5` and `2.0`.
+- **Both playback modes work.** The streaming path feeds chunks through the stretcher as they are generated and keeps
+  its low latency, at the cost of a small algorithmic delay — one frame plus the search radius, ~50ms at the default
+  settings. The buffered path stretches the finished utterance in one pass.
+- **The saved WAV matches what you hear** — the file is written from the stretched audio, not the original.
+- **A value of exactly `1.0` bypasses the stretcher entirely**, so an unused setting costs nothing.
+- `speed` does not change the streaming/normalization trade-off above; the two remain independent.
 
 ### Ducking other audio
 
