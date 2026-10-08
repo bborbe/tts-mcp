@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- fix: pausing speech now releases the duck immediately, so other applications' audio returns to full volume instead of staying quiet for the whole pause; resuming re-applies it. The release bypasses `hold_ms`, which exists only to bridge back-to-back utterances, and a cancel out of a pause leaves the audio up rather than re-ducking a voice that is about to stop.
+
 ## v0.22.1
 
 - docs: README no longer describes a TypeScript relay or lists Node.js as a prerequisite. Rollout note: a Claude Code session started before its config switched to `/mcp` keeps its already-running stdio relay, but if it respawns the relay (an `/mcp` reconnect) the respawn fails because `mcp/` is gone — restart the session to pick up the HTTP config and `headersHelper`.

@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -93,6 +94,7 @@ class TestNullDucker:
         ducker = NullDucker()
         ducker.duck()
         ducker.unduck()
+        ducker.unduck_now()
 
 
 class TestSocketDucker:
@@ -123,6 +125,54 @@ class TestSocketDucker:
 
         assert sock.sendall.call_args_list[-1].args == (b"unduck",)
         assert sock.sendall.call_count == 2
+
+    def test_unduck_now_sends_the_command_without_the_hold(self) -> None:
+        # The hold bridges back-to-back utterances; a pause is not that gap, so
+        # the release must not wait it out. A hold far longer than the test
+        # would otherwise pass only if unduck_now skipped it.
+        ducker = SocketDucker(DuckConfig(socket_path="/tmp/x.sock", level=0.25, fade_down_ms=100, fade_up_ms=150, hold_ms=60000))
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck_now()
+            self._wait_for_release(ducker)
+
+        assert sock.sendall.call_args_list[-1].args == (b"unduck",)
+        assert sock.sendall.call_count == 2
+
+    def test_duck_after_a_completed_release_re_ducks(self) -> None:
+        # Deterministic counterpart to the race below: once the release has
+        # actually landed, a resume must send a fresh duck.
+        ducker = self._ducker()
+        duck_command = f"duck 0.25 100 150 {os.getpid()}".encode()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck_now()
+            self._wait_for_release(ducker)
+            ducker.duck()
+
+        sent = [call.args[0] for call in sock.sendall.call_args_list]
+        assert sent == [duck_command, b"unduck", duck_command]
+
+    def test_duck_racing_a_pending_release_ends_ducked(self) -> None:
+        # A resume landing while the zero-delay release is still in flight must
+        # not leave the audio up — the mirror of the bug this feature fixes.
+        # Whichever side wins the ducker lock the end state is ducked, so the
+        # duck is the last command sent. Whether an unduck was transmitted at
+        # all depends on that race, so this asserts the end state rather than a
+        # command sequence; test_duck_after_a_completed_release_re_ducks pins
+        # the sequence.
+        ducker = self._ducker()
+        duck_command = f"duck 0.25 100 150 {os.getpid()}".encode()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck_now()
+            ducker.duck()
+
+        assert sock.sendall.call_args_list[-1].args == (duck_command,)
+        assert ducker._ducked is True
 
     def test_unduck_without_a_duck_sends_nothing(self) -> None:
         with patch("src.tts.duck.socket.socket") as mock_socket:
@@ -241,6 +291,7 @@ class TestPlayerDuckPairing:
         ducker = MagicMock()
         ducker.duck.side_effect = lambda: events.append("duck")
         ducker.unduck.side_effect = lambda: events.append("unduck")
+        ducker.unduck_now.side_effect = lambda: events.append("unduck_now")
         return ducker
 
     @patch("src.tts.player.sd")
@@ -309,3 +360,121 @@ class TestPlayerDuckPairing:
 
         assert len(errors) == 1
         assert events == ["duck", "unduck"]
+
+    @patch("src.tts.player.sd")
+    def test_releases_the_duck_while_paused_and_re_ducks_on_resume(self, mock_sd: MagicMock) -> None:
+        """A paused voice is not audible, so other audio must not stay ducked.
+
+        Pause parks the player thread inside the job, so the ``finally`` that
+        releases the duck never runs — the release has to happen where the
+        player actually waits.
+        """
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        pause = threading.Event()
+        during_pause: list[str] = []
+        writes = 0
+
+        def on_write(_frames: object) -> None:
+            nonlocal writes
+            writes += 1
+            events.append("write")
+            if writes == 3:
+                pause.set()
+
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = on_write
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        parked: list[bool] = []
+
+        def wait_for_event(name: str, timeout: float = 5.0) -> None:
+            """Wait for a recorded ducker event, so the test needs no fixed sleep."""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and name not in events:
+                time.sleep(0.005)
+
+        def observe_then_resume() -> None:
+            try:
+                parked.append(pause.wait(timeout=5))
+                wait_for_event("unduck_now")
+                during_pause.extend(events)
+            finally:
+                # Always release the pause. If this thread dies first,
+                # player.close() blocks forever on the job queue and hangs the
+                # suite instead of failing it.
+                pause.clear()
+
+        controller = threading.Thread(target=observe_then_resume, daemon=True)
+        controller.start()
+        player.submit(PlaybackJob(chunks=[np.ones(100, dtype=np.float32)] * 40, output_path=None, pause=pause))
+        controller.join(timeout=5)
+        player.close()
+
+        assert parked == [True], "the player never parked on the pause"
+        assert "unduck_now" in during_pause, f"pause left the duck applied: {during_pause}"
+        assert events.count("duck") == 2, f"resume did not re-duck: {events}"
+        assert events.count("unduck") == 1
+        assert events[-1] == "unduck"
+
+    @patch("src.tts.player.sd")
+    def test_cancel_while_paused_does_not_re_duck(self, mock_sd: MagicMock) -> None:
+        """Leaving the pause by cancelling must not put the duck back on."""
+        from src.tts.player import AudioPlayer, PlaybackJob
+
+        events: list[str] = []
+        pause = threading.Event()
+        cancel = threading.Event()
+        writes = 0
+
+        def on_write(_frames: object) -> None:
+            nonlocal writes
+            writes += 1
+            events.append("write")
+            if writes == 3:
+                pause.set()
+
+        mock_stream = MagicMock()
+        mock_stream.write.side_effect = on_write
+        mock_sd.OutputStream.return_value = mock_stream
+        player = AudioPlayer(sample_rate=1000, lead_silence_ms=0, ducker=self._recording_ducker(events))
+
+        parked: list[bool] = []
+
+        def wait_for_event(name: str, timeout: float = 5.0) -> None:
+            """Wait for a recorded ducker event, so the test needs no fixed sleep."""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and name not in events:
+                time.sleep(0.005)
+
+        def pause_then_cancel() -> None:
+            try:
+                parked.append(pause.wait(timeout=5))
+                wait_for_event("unduck_now")
+            finally:
+                # Cancel in a finally, so a timeout here fails the assertions
+                # below rather than hanging player.close() on the job queue.
+                cancel.set()
+
+        cancelled: list[bool] = []
+        controller = threading.Thread(target=pause_then_cancel, daemon=True)
+        controller.start()
+        player.submit(
+            PlaybackJob(
+                chunks=[np.ones(100, dtype=np.float32)] * 40,
+                output_path=None,
+                on_cancel=lambda: cancelled.append(True),
+                cancel=cancel,
+                pause=pause,
+            )
+        )
+        controller.join(timeout=5)
+        player.close()
+
+        assert parked == [True], "the player never parked on the pause"
+        assert cancelled == [True]
+        assert "unduck_now" in events
+        assert events.count("duck") == 1, f"cancel re-ducked the audio: {events}"
+        assert events[-1] == "unduck"

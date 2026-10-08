@@ -79,6 +79,10 @@ class Ducker(Protocol):
         """Ramp other applications' audio back to full volume."""
         ...
 
+    def unduck_now(self) -> None:
+        """Ramp back to full volume without waiting out the hold window."""
+        ...
+
 
 class NullDucker:
     """Ducker used when the feature is disabled; does nothing."""
@@ -87,6 +91,9 @@ class NullDucker:
         """Do nothing."""
 
     def unduck(self) -> None:
+        """Do nothing."""
+
+    def unduck_now(self) -> None:
         """Do nothing."""
 
 
@@ -102,6 +109,9 @@ class SocketDucker:
     keep the music down rather than pumping it up and back, and the playback
     thread never waits on the fade-up. If this process dies with a release
     pending, the helper notices the spared pid is gone and releases on its own.
+
+    ``unduck_now`` skips that window, for the cases the hold does not serve —
+    see its docstring.
     """
 
     def __init__(self, config: DuckConfig) -> None:
@@ -131,11 +141,24 @@ class SocketDucker:
 
     def unduck(self) -> None:
         """Schedule the music to ramp back up once ``hold_ms`` passes quietly."""
+        self._schedule_release(self._config.hold_ms / 1000.0)
+
+    def unduck_now(self) -> None:
+        """Release without waiting out the hold window.
+
+        The hold bridges the gap between back-to-back utterances. A pause is
+        not that gap — the operator is deliberately listening to something
+        else — so deferring the release behind the hold would leave the other
+        audio quiet for the whole pause, which is the bug this exists to fix.
+        """
+        self._schedule_release(0.0)
+
+    def _schedule_release(self, delay_seconds: float) -> None:
         with self._lock:
             self._cancel_release()
             if not self._ducked:
                 return
-            timer = threading.Timer(self._config.hold_ms / 1000.0, self._release_now)
+            timer = threading.Timer(delay_seconds, self._release_now)
             timer.daemon = True
             self._release = timer
             timer.start()
