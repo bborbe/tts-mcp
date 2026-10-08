@@ -64,6 +64,7 @@ def _make_state(
     engine_default_voices: dict[str, str] | None = None,
     allowed_voices_by_engine: dict[str, tuple[str, ...]] | None = None,
     ducker: Ducker | None = None,
+    speed: float = 1.0,
 ) -> ServerState:
     """Create a ServerState for testing.
 
@@ -109,6 +110,7 @@ def _make_state(
         streaming_interval=streaming_interval,
         streaming_warmup_seconds=streaming_warmup_seconds,
         ducker=ducker,
+        speed=speed,
     )
     if preload_model:
         # Mirror what the worker reports after loading, so /voices sees it.
@@ -147,10 +149,11 @@ class _ImmediateAudioPlayer:
     active_count = 0
     max_active_count = 0
 
-    def __init__(self, sample_rate: int, lead_silence_ms: int, ducker: Ducker | None = None) -> None:
+    def __init__(self, sample_rate: int, lead_silence_ms: int, ducker: Ducker | None = None, speed: float = 1.0) -> None:
         self._sample_rate = sample_rate
         self._lead_silence_ms = lead_silence_ms
         self._ducker = ducker if ducker is not None else NullDucker()
+        self._speed = speed
 
     def submit(self, job: Any) -> None:
         _ImmediateAudioPlayer.active_count += 1

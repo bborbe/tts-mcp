@@ -42,6 +42,8 @@ class AudioSettings:
         ducker: Lowers other apps' audio around each utterance. Defaults to a
             no-op ducker, so a caller that does not configure ducking (the CLI)
             is unaffected.
+        speed: Playback speed. 1.0 plays as generated; other values are applied
+            by a pitch-preserving time-stretch in the player.
     """
 
     sample_rate: int
@@ -55,6 +57,7 @@ class AudioSettings:
     streaming_interval: float
     streaming_warmup_seconds: float
     ducker: Ducker = dataclasses.field(default_factory=NullDucker)
+    speed: float = 1.0
 
 
 def _generate_worker_chunks(engine: TTSEngine, model: TTSModel, text: str, voice: str, settings: AudioSettings) -> list[np.ndarray] | None:
@@ -253,7 +256,7 @@ def audio_worker(
         output_path: Path to save generated audio, or None to skip saving.
         settings: Audio generation, normalization, and playback settings.
     """
-    player = AudioPlayer(settings.sample_rate, settings.lead_silence_ms, settings.ducker)
+    player = AudioPlayer(settings.sample_rate, settings.lead_silence_ms, settings.ducker, settings.speed)
     try:
         if settings.stream:
             _run_streaming_worker(work_queue, engine, model, voice, output_path, player, settings)

@@ -13,6 +13,11 @@ normalize_audio: true
 target_lufs: -10.0
 true_peak_ceiling_db: -1.0
 min_duration_seconds: 0.5
+# Playback speed. 1.0 (the default) plays as generated. Any other value is
+# applied by a pitch-preserving time-stretch, so a faster voice keeps its pitch
+# instead of sounding like a chipmunk. Practical range is 0.5 to 2.0; the key
+# is optional, so a config without it behaves exactly as before.
+speed: 1.0
 host: 0.0.0.0
 port: 12000
 # Duck other applications' audio while the voice speaks. Requires the TTSDuck

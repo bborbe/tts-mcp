@@ -54,6 +54,13 @@ from src.tts.text import (
     clean_text,
     simplify_punctuation,
 )
+from src.tts.timestretch import (
+    MAX_SPEED,
+    MIN_SPEED,
+    TimeStretcher,
+    speed_from_config,
+    stretch,
+)
 from src.tts.voices import (
     resolve_voice,
 )
@@ -78,6 +85,8 @@ __all__ = [
     "EngineRegistry",
     "EngineSpec",
     "LoadedEngine",
+    "MAX_SPEED",
+    "MIN_SPEED",
     "NullDucker",
     "PlaybackJob",
     "Qwen3Engine",
@@ -85,6 +94,7 @@ __all__ = [
     "StreamingPlaybackJob",
     "TTSEngine",
     "TTSModel",
+    "TimeStretcher",
     "VoxtralEngine",
     "audio_worker",
     "audio_worker_from_model_id",
@@ -109,6 +119,8 @@ __all__ = [
     "restart_process_on_device_change",
     "save_audio",
     "simplify_punctuation",
+    "speed_from_config",
     "start_output_device_change_watcher",
     "streaming_chunk_iter",
+    "stretch",
 ]
