@@ -343,6 +343,9 @@ Behaviour worth knowing:
 - **Back-to-back messages stay ducked.** The release is deferred by `hold_ms`; a new message inside that window
   keeps the music down instead of letting it rise between sentences. Set it above the gap while the next message
   generates.
+- **Pausing releases the duck immediately.** The `hold_ms` deferral is skipped, so other audio returns while the
+  voice is paused instead of staying down for the whole pause, and resuming ducks it again. Cancelling out of a
+  pause leaves the audio up rather than re-ducking a voice that is about to stop.
 - **Nothing gets stranded.** If the helper dies, the tap dies with it and audio returns. If the server dies while
   ducked, the helper notices the server's pid is gone and releases within a second.
 - **Best-effort.** With no helper running, speech plays at full music volume and one warning is logged.

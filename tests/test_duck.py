@@ -140,12 +140,29 @@ class TestSocketDucker:
         assert sock.sendall.call_args_list[-1].args == (b"unduck",)
         assert sock.sendall.call_count == 2
 
-    def test_duck_after_unduck_now_leaves_the_audio_ducked(self) -> None:
-        # A resume landing on a pending zero-delay release must not leave the
-        # audio up — the mirror of the bug this feature fixes. Whichever order
-        # the two commands land in, the duck is last: either duck() cancels the
-        # timer before it fires, or it blocks on the lock until _release_now has
-        # finished and then sends its own duck.
+    def test_duck_after_a_completed_release_re_ducks(self) -> None:
+        # Deterministic counterpart to the race below: once the release has
+        # actually landed, a resume must send a fresh duck.
+        ducker = self._ducker()
+        duck_command = f"duck 0.25 100 150 {os.getpid()}".encode()
+        with patch("src.tts.duck.socket.socket") as mock_socket:
+            sock = mock_socket.return_value.__enter__.return_value
+            ducker.duck()
+            ducker.unduck_now()
+            self._wait_for_release(ducker)
+            ducker.duck()
+
+        sent = [call.args[0] for call in sock.sendall.call_args_list]
+        assert sent == [duck_command, b"unduck", duck_command]
+
+    def test_duck_racing_a_pending_release_ends_ducked(self) -> None:
+        # A resume landing while the zero-delay release is still in flight must
+        # not leave the audio up — the mirror of the bug this feature fixes.
+        # Whichever side wins the ducker lock the end state is ducked, so the
+        # duck is the last command sent. Whether an unduck was transmitted at
+        # all depends on that race, so this asserts the end state rather than a
+        # command sequence; test_duck_after_a_completed_release_re_ducks pins
+        # the sequence.
         ducker = self._ducker()
         duck_command = f"duck 0.25 100 150 {os.getpid()}".encode()
         with patch("src.tts.duck.socket.socket") as mock_socket:
@@ -380,10 +397,15 @@ class TestPlayerDuckPairing:
                 time.sleep(0.005)
 
         def observe_then_resume() -> None:
-            parked.append(pause.wait(timeout=5))
-            wait_for_event("unduck_now")
-            during_pause.extend(events)
-            pause.clear()
+            try:
+                parked.append(pause.wait(timeout=5))
+                wait_for_event("unduck_now")
+                during_pause.extend(events)
+            finally:
+                # Always release the pause. If this thread dies first,
+                # player.close() blocks forever on the job queue and hangs the
+                # suite instead of failing it.
+                pause.clear()
 
         controller = threading.Thread(target=observe_then_resume, daemon=True)
         controller.start()
@@ -428,9 +450,13 @@ class TestPlayerDuckPairing:
                 time.sleep(0.005)
 
         def pause_then_cancel() -> None:
-            parked.append(pause.wait(timeout=5))
-            wait_for_event("unduck_now")
-            cancel.set()
+            try:
+                parked.append(pause.wait(timeout=5))
+                wait_for_event("unduck_now")
+            finally:
+                # Cancel in a finally, so a timeout here fails the assertions
+                # below rather than hanging player.close() on the job queue.
+                cancel.set()
 
         cancelled: list[bool] = []
         controller = threading.Thread(target=pause_then_cancel, daemon=True)
