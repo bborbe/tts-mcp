@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: a direct question from the operator is now answered by voice in every active mode. The playbook's Answers column gated the spoken answer on the ACTION test and marked `interview` "screen only", and `commands/on.md`, `commands/attention.md` and `commands/interview.md` repeated the same gating — so a session could read any of the four and withhold an answer the operator had just asked for. All four now state that a question asked is answered aloud in 1–3 sentences, gist first, while the ACTION test continues to gate only what is spoken *unprompted*. Aligns the plugin's docs with the `voice-mode.py` hook (`~/.claude` commit `5d79cf3`), which already injects this rule.
+
 ## v0.24.0
 
 - feat: launchd hardening after the 2026-10-17 kernel panic, which a `KeepAlive` crash loop at launchd's 10 s default throttle preceded. The duck helper plist template now carries `ThrottleInterval` 30 and `SoftResourceLimits.NumberOfFiles` 4096, and a new idempotent `make launchd-baseline` sets the same two keys on the hand-installed `com.bborbe.tts-mcp` server plist and reloads it. `duck-helper-agent` now waits for the asynchronous `bootout` to finish before `bootstrap` (new `launchd-wait-gone` target), which previously could fail with `5: Input/output error`.
