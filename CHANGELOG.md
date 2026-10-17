@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.24.0
 
 - feat: launchd hardening after the 2026-10-17 kernel panic, which a `KeepAlive` crash loop at launchd's 10 s default throttle preceded. The duck helper plist template now carries `ThrottleInterval` 30 and `SoftResourceLimits.NumberOfFiles` 4096, and a new idempotent `make launchd-baseline` sets the same two keys on the hand-installed `com.bborbe.tts-mcp` server plist and reloads it. `duck-helper-agent` now waits for the asynchronous `bootout` to finish before `bootstrap` (new `launchd-wait-gone` target), which previously could fail with `5: Input/output error`.
 
