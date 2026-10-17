@@ -97,19 +97,21 @@ LAUNCHD_PLIST ?= $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 
 .PHONY: launchd-baseline
 # Enforce the launchd baseline (ThrottleInterval 30, NumberOfFiles 4096) on the
-# hand-installed server plist and reload it. Idempotent; touches only these keys.
+# hand-installed server plist and reload it. Idempotent; touches only these keys, and reloads only when the plist changed.
 # launchd's 10 s default lets a crashing job relaunch ~6x/min forever; a crash
 # loop like that preceded the 2026-10-17 kernel panic.
 launchd-baseline:
 	@test -f "$(LAUNCHD_PLIST)" || { echo "plist not installed: $(LAUNCHD_PLIST)" >&2; exit 1; }
-	/usr/libexec/PlistBuddy -c 'Delete :ThrottleInterval' "$(LAUNCHD_PLIST)" 2>/dev/null || true
-	/usr/libexec/PlistBuddy -c 'Add :ThrottleInterval integer 30' "$(LAUNCHD_PLIST)"
-	/usr/libexec/PlistBuddy -c 'Delete :SoftResourceLimits' "$(LAUNCHD_PLIST)" 2>/dev/null || true
-	/usr/libexec/PlistBuddy -c 'Add :SoftResourceLimits:NumberOfFiles integer 4096' "$(LAUNCHD_PLIST)"
+	@shasum "$(LAUNCHD_PLIST)" > "$(LAUNCHD_PLIST).sha.tmp"
+	/usr/libexec/PlistBuddy -c 'Set :ThrottleInterval 30' "$(LAUNCHD_PLIST)" 2>/dev/null \
+		|| /usr/libexec/PlistBuddy -c 'Add :ThrottleInterval integer 30' "$(LAUNCHD_PLIST)"
+	/usr/libexec/PlistBuddy -c 'Set :SoftResourceLimits:NumberOfFiles 4096' "$(LAUNCHD_PLIST)" 2>/dev/null \
+		|| /usr/libexec/PlistBuddy -c 'Add :SoftResourceLimits:NumberOfFiles integer 4096' "$(LAUNCHD_PLIST)"
 	plutil -lint "$(LAUNCHD_PLIST)"
-	-launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL)
-	$(MAKE) launchd-wait-gone LAUNCHD_LABEL=$(LAUNCHD_LABEL)
-	launchctl bootstrap gui/$$(id -u) "$(LAUNCHD_PLIST)"
+	@if shasum -c --status "$(LAUNCHD_PLIST).sha.tmp"; then rm -f "$(LAUNCHD_PLIST).sha.tmp"; echo "$(LAUNCHD_LABEL): baseline already set, not reloading"; else \
+		rm -f "$(LAUNCHD_PLIST).sha.tmp"; \
+		if launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; then launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL); fi; \
+		$(MAKE) launchd-wait-gone LAUNCHD_LABEL=$(LAUNCHD_LABEL) && launchctl bootstrap gui/$$(id -u) "$(LAUNCHD_PLIST)"; fi
 
 .PHONY: launchd-wait-gone
 # bootout is asynchronous: bootstrapping before the job is gone fails with
@@ -124,6 +126,7 @@ duck-helper-agent-remove:
 	if launchctl print gui/$$(id -u)/com.bborbe.tts-mcp.duck >/dev/null 2>&1; then \
 		launchctl bootout gui/$$(id -u)/com.bborbe.tts-mcp.duck; \
 	fi
+	$(MAKE) launchd-wait-gone LAUNCHD_LABEL=com.bborbe.tts-mcp.duck
 	rm -f "$(HELPER_AGENT)"
 	rm -rf "$(HELPER_HOME)"
 	@echo "removed com.bborbe.tts-mcp.duck and $(HELPER_HOME)"
