@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: launchd hardening after the 2026-10-17 kernel panic, which a `KeepAlive` crash loop at launchd's 10 s default throttle preceded. The duck helper plist template now carries `ThrottleInterval` 30 and `SoftResourceLimits.NumberOfFiles` 4096, and a new idempotent `make launchd-baseline` sets the same two keys on the hand-installed `com.bborbe.tts-mcp` server plist and reloads it. `duck-helper-agent` now waits for the asynchronous `bootout` to finish before `bootstrap` (new `launchd-wait-gone` target), which previously could fail with `5: Input/output error`.
+
 ## v0.23.0
 
 - feat: Optional `speed` config key (default `1.0`) plays utterances faster or slower. The change is applied by a pitch-preserving time-stretch (WSOLA, in `src/tts/timestretch.py`) rather than by resampling, so a faster voice keeps its pitch instead of sounding like a chipmunk. It works in both playback modes: the streaming path feeds chunks through the stretcher as they are generated and keeps its low latency, at the cost of a small algorithmic delay (one frame plus the search radius, ~50ms at the default settings); the buffered path stretches the finished utterance in one pass. The saved WAV is written from the stretched audio, so it matches what was heard. The key is optional, so a config without it behaves exactly as before, and a value of exactly `1.0` bypasses the stretcher entirely.

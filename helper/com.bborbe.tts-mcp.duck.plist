@@ -21,6 +21,17 @@
     <key>KeepAlive</key>
     <true/>
 
+    <!-- launchd's 10 s default lets a crashing job relaunch ~6x/min forever;
+         a crash loop like that preceded the 2026-10-17 kernel panic. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
     <!-- The IOProc runs on a realtime thread either way; this keeps the
          control loop responsive under load, same as the TTS server. -->
     <key>ProcessType</key>
