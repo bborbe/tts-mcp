@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.25.0
 
 - feat: a direct question from the operator is now answered by voice in every active mode. The playbook's Answers column gated the spoken answer on the ACTION test and marked `interview` "screen only", and `commands/on.md`, `commands/attention.md` and `commands/interview.md` repeated the same gating — so a session could read any of the four and withhold an answer the operator had just asked for. All four now state that a question asked is answered aloud in 1–3 sentences, gist first, while the ACTION test continues to gate only what is spoken *unprompted*. Aligns the plugin's docs with the `voice-mode.py` hook (`~/.claude` commit `5d79cf3`), which already injects this rule.
 
