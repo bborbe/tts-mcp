@@ -88,8 +88,35 @@ duck-helper-agent: duck-helper-install
 	if launchctl print gui/$$(id -u)/com.bborbe.tts-mcp.duck >/dev/null 2>&1; then \
 		launchctl bootout gui/$$(id -u)/com.bborbe.tts-mcp.duck; \
 	fi
+	$(MAKE) launchd-wait-gone LAUNCHD_LABEL=com.bborbe.tts-mcp.duck
 	launchctl bootstrap gui/$$(id -u) "$(HELPER_AGENT)"
 	@echo "loaded com.bborbe.tts-mcp.duck (log: ~/Library/Logs/tts-mcp/duck.log)"
+
+LAUNCHD_LABEL ?= com.bborbe.tts-mcp
+LAUNCHD_PLIST ?= $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
+
+.PHONY: launchd-baseline
+# Enforce the launchd baseline (ThrottleInterval 30, NumberOfFiles 4096) on the
+# hand-installed server plist and reload it. Idempotent; touches only these keys.
+# launchd's 10 s default lets a crashing job relaunch ~6x/min forever; a crash
+# loop like that preceded the 2026-10-17 kernel panic.
+launchd-baseline:
+	@test -f "$(LAUNCHD_PLIST)" || { echo "plist not installed: $(LAUNCHD_PLIST)" >&2; exit 1; }
+	/usr/libexec/PlistBuddy -c 'Delete :ThrottleInterval' "$(LAUNCHD_PLIST)" 2>/dev/null || true
+	/usr/libexec/PlistBuddy -c 'Add :ThrottleInterval integer 30' "$(LAUNCHD_PLIST)"
+	/usr/libexec/PlistBuddy -c 'Delete :SoftResourceLimits' "$(LAUNCHD_PLIST)" 2>/dev/null || true
+	/usr/libexec/PlistBuddy -c 'Add :SoftResourceLimits:NumberOfFiles integer 4096' "$(LAUNCHD_PLIST)"
+	plutil -lint "$(LAUNCHD_PLIST)"
+	-launchctl bootout gui/$$(id -u)/$(LAUNCHD_LABEL)
+	$(MAKE) launchd-wait-gone LAUNCHD_LABEL=$(LAUNCHD_LABEL)
+	launchctl bootstrap gui/$$(id -u) "$(LAUNCHD_PLIST)"
+
+.PHONY: launchd-wait-gone
+# bootout is asynchronous: bootstrapping before the job is gone fails with
+# `5: Input/output error`. Wait up to 20 s.
+launchd-wait-gone:
+	@i=0; while launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; do \
+		i=$$((i+1)); [ $$i -le 40 ] || { echo "bootout of $(LAUNCHD_LABEL) did not finish" >&2; exit 1; }; sleep 0.5; done
 
 .PHONY: duck-helper-agent-remove
 # Stop the launchd agent and remove it, the plist and the installed helper
