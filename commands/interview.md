@@ -1,10 +1,10 @@
 ---
-description: Turn TTS voice on in interview mode — every question needing your input is read aloud, one at a time.
+description: Turn TTS voice on in interview mode — every question needing your input is read aloud, one at a time, and your questions are answered aloud.
 ---
 
 Enable spoken output for **this session**, tuned for being away from the keyboard.
 
-Sets mode **`interview`** — attention signals plus **every question that needs the user's input**, read aloud one at a time. For driving or walking, where you cannot read the screen to see what you are being asked.
+Sets mode **`interview`** — attention signals, **every question that needs the user's input** read aloud one at a time, and an answer to any question the user asks (1–3 sentences, gist first; every active mode answers a direct question). For driving or walking, where you cannot read the screen to see what you are being asked.
 
 ## Steps
 
@@ -18,9 +18,11 @@ Sets mode **`interview`** — attention signals plus **every question that needs
 
 3. **Print one status line:** `🔊 voice: interview (ryan) — persists until /tts-mcp:off`
 
-## What this does not do
+## What this does, and what it does not
 
-⚠️ **`interview` speaks questions, not answers.** One state file holds one mode, so this and `/tts-mcp:on` are mutually exclusive — while driving you hear what you are being asked, but the reply stays on screen. That is a real gap for a hands-free session; say so rather than assuming this mode covers it.
+**`interview` speaks your questions *and* the user's answers.** A direct question is answered aloud in every active mode, so a hands-free reply no longer stays on screen; `interview` adds the questions *you* are being asked, read aloud one at a time.
+
+One state file holds one mode, so `interview` and `/tts-mcp:on` remain mutually exclusive. What separates them is the unprompted gist: `on` speaks a short gist of a turn that passes the ACTION test, `interview` speaks no such gist — its voice budget goes to questions and answers instead.
 
 ## Full rules
 

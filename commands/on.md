@@ -1,10 +1,10 @@
 ---
-description: Turn TTS voice on for this session — attention signals plus an ACTION-gated answer gist. Persists until /tts-mcp:off.
+description: Turn TTS voice on for this session — attention signals, answers to your questions, plus an ACTION-gated gist. Persists until /tts-mcp:off.
 ---
 
 Enable spoken output for **this session** and make it stick.
 
-Sets mode **`on`** — attention signals, plus a short spoken gist of an answer **only when it passes the ACTION test** in `Attention Costs Operator` (`~/.claude/CLAUDE.md`): is there something the user must do? An answer that asks nothing of the user stays on screen. That is the level for following the work away from the screen. For hard silence on every answer, use `/tts-mcp:attention`; to have *questions* spoken instead (driving by voice), use `/tts-mcp:interview`.
+Sets mode **`on`** — attention signals, an answer to any question the user asks, plus a short spoken gist of a turn that passes the ACTION test in `Attention Costs Operator` (`~/.claude/CLAUDE.md`): is there something the user must do? A direct question from the user is answered aloud (1–3 sentences, gist first) in **every** active mode, this one included; the ACTION test gates only what is spoken *unprompted*, so a turn that asks nothing of the user stays on screen. That is the level for following the work away from the screen. For unprompted speech cut back to the attention signal alone, use `/tts-mcp:attention`; to have *your* questions read aloud as well (driving by voice), use `/tts-mcp:interview`.
 
 ## Steps
 

@@ -19,23 +19,25 @@ Voice is **off until a command turns it on**. Nothing else enables it — not a 
 
 The screen is the detail channel; voice is the attention channel. A `say()` costs ~2–5s and plays at ~150 wpm — slower than the user can read. That is the whole reason volume is a *setting*: speaking everything is exhausting, speaking nothing defeats walking away from the screen.
 
-| Command | Attention signals | Answers | Every question |
+| Command | Attention signals | Answers to your questions | Questions asked of you |
 |---|---|---|---|
-| `/tts-mcp:on` | ✅ | ⚠️ only when the ACTION test passes — see **Attention Costs Operator** | ❌ decisions only |
-| `/tts-mcp:attention` | ✅ | ❌ never — the attention signal only | ❌ decisions only |
-| `/tts-mcp:interview` | ✅ | ❌ screen only | ✅ one at a time |
+| `/tts-mcp:on` | ✅ | ✅ 1–3 sentences | ❌ decisions only |
+| `/tts-mcp:attention` | ✅ | ✅ 1–3 sentences | ❌ decisions only |
+| `/tts-mcp:interview` | ✅ | ✅ 1–3 sentences | ✅ one at a time |
 | `/tts-mcp:off` | ❌ | ❌ | ❌ |
 
-⚠️ **The `on` Answers column is gated by the ACTION test, not by the answer being substantive.** Before speaking an answer, apply the test in **Attention Costs Operator** (`~/.claude/CLAUDE.md`, Operational) — *is there something the user must DO?* If the answer is no, stay silent and let the screen carry it. That rule is channel-independent and is the single source of truth for what the test admits, so it is referenced here by name and its detail is deliberately **not** duplicated — a second copy would drift from it.
+**A direct question from the operator is answered by voice in every active mode** — `on`, `attention` and `interview` alike. Speak the answer as 1–3 sentences, gist first. The answer is owed whether or not anything follows it: a question asked is the operator waiting to hear, so an answer is never withheld for want of an action.
 
-**`on` vs `attention`.** `on` still speaks a short gist, but only for turns that pass the ACTION test. `attention` is the stricter mode: it speaks the attention signal and nothing else, never a gist — for when the channel should carry only what you must act on. Everything else in this playbook (voice, `sender` tag, throwaway lead, terseness) applies to both.
+⚠️ **The ACTION test gates *unprompted* speech, not answers to the operator's own questions.** The test in **Attention Costs Operator** (`~/.claude/CLAUDE.md`, Operational) — *is there something the user must DO?* — decides whether you volunteer a spoken gist for a turn nobody asked about, and whether an attention signal is worth raising. It does not silence an answer they asked for. That rule is channel-independent and is the single source of truth for what the test admits, so it is referenced here by name and its detail is deliberately **not** duplicated — a second copy would drift from it.
+
+**`on` vs `attention`.** Both answer a direct question aloud; they differ in what they volunteer *unprompted*. `on` speaks a short gist of a turn that passes the ACTION test. `attention` is the stricter mode: it speaks the attention signal and nothing else, never a gist — for when the channel should carry only what you must act on. Everything else in this playbook (voice, `sender` tag, throwaway lead, terseness) applies to both.
 
 **Attention signals** (spoken in every mode except off):
 
 - **Completion / failure** of background or long-running work — `say("PR 42 merged.")`, `say("Build failed in capitalcom-gateway.")`.
 - A **decision point** where you're waiting on the user — `say("Needs your input.")`.
 
-⚠️ **`interview` speaks questions, not answers.** One state file holds one mode, so `interview`, `on` and `attention` are mutually exclusive: while driving, you hear what you are being asked but the reply stays on screen. If you want both, that is a real gap — say so rather than assuming `interview` covers it.
+⚠️ **`interview` speaks your questions *and* the operator's answers.** One state file holds one mode, so `interview`, `on` and `attention` are mutually exclusive — an exclusivity that now costs nothing here, since every active mode answers a direct question aloud. `interview` stays the mode for driving or walking because it adds the questions *you* are being asked, read aloud one at a time, which the other two modes leave on screen.
 
 ## How to speak
 
@@ -70,6 +72,8 @@ The screen is the detail channel; voice is the attention channel. A `say()` cost
 - Code, long lists, or file dumps — voice is the wrong shape for them.
 - The reply verbatim. Even in `on`, speak the headline and let the screen carry the detail; never let voice and text be the same content at the same length.
 - Nothing on account of the user appearing present. An explicit voice command **is** the request — speak even while they watch.
+
+None of these cancel the answer rule. A direct question from the operator is still answered aloud in every active mode, as a 1–3 sentence gist — *"never the reply verbatim"* shapes **how much** you speak, never **whether** you answer.
 
 ## Never describe speech you did not send
 
