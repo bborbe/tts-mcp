@@ -76,6 +76,7 @@ def start_output_device_change_watcher(
     get_device: Callable[[], int | None],
     on_change: Callable[[int], None],
     stop_event: threading.Event,
+    sustained_polls: int = 3,
 ) -> threading.Thread:
     """Restart the process when the macOS default output device changes.
 
@@ -88,31 +89,55 @@ def start_output_device_change_watcher(
     Trade-off: the fresh process reloads the TTS model (~15-20s of no voice),
     acceptable for infrequent plug/unplug switches.
 
-    The poll compares against the boot device only, so transient/aggregate device
-    ids the HAL reports mid-playback (which flip back within milliseconds) do not
-    trigger a restart; only a sustained switch does.
+    Only a *sustained* switch triggers a restart: the same non-boot device id must
+    be reported on ``sustained_polls`` consecutive polls. A transient/aggregate
+    device id the HAL reports mid-playback resets the streak as soon as the poll
+    returns to the boot device or to a different id, so it never fires. This is
+    what the docstring promised before it was implemented: without it, the watcher
+    restarted on the first differing poll, and transient blips restarted the
+    process ~808 times.
 
     Args:
         poll_interval_s: Seconds between HAL polls.
         get_device: Returns the current default output device id (injectable for tests).
         on_change: Called with the new device id on a sustained change.
         stop_event: When set, the watch loop returns (used by tests).
+        sustained_polls: Consecutive polls reporting the same non-boot device id
+            required before ``on_change`` fires. Defaults to 3, i.e. ~6s at the
+            2.0s poll interval in ``src/server.py``.
 
     Returns:
         The started daemon thread.
+
+    Raises:
+        ValueError: If ``sustained_polls`` is less than 1.
     """
+    if sustained_polls < 1:
+        msg = f"sustained_polls must be >= 1, got {sustained_polls}"
+        raise ValueError(msg)
 
     def _run() -> None:
         boot_device = get_device()
+        candidate: int | None = None
+        streak = 0
         while not stop_event.wait(poll_interval_s):
             current = get_device()
-            if current is not None and boot_device is not None and current != boot_device:
-                print(
-                    f"audio: default output device changed ({boot_device} -> {current}); restarting process for a clean CoreAudio HAL",
-                    file=sys.stderr,
-                )
-                on_change(current)
-                return
+            if current is None or boot_device is None or current == boot_device:
+                candidate, streak = None, 0
+                continue
+            if current == candidate:
+                streak += 1
+            else:
+                candidate, streak = current, 1
+            if streak < sustained_polls:
+                continue
+            print(
+                f"audio: default output device changed ({boot_device} -> {current}) "
+                f"for {streak} consecutive polls; restarting process for a clean CoreAudio HAL",
+                file=sys.stderr,
+            )
+            on_change(current)
+            return
 
     thread = threading.Thread(target=_run, name="device-change-watcher", daemon=True)
     thread.start()
