@@ -1377,8 +1377,8 @@ class TestNormalizeChunks:
 
 
 def test_output_device_change_watcher_fires_on_change() -> None:
-    """A default-output-device change calls on_change with the new device id."""
-    devices = [1, 1, 2]
+    """A sustained default-output-device change calls on_change with the new device id."""
+    devices = [1, 1, 2, 2, 2]
     idx = {"i": 0}
 
     def fake_get_device() -> int | None:
@@ -1400,7 +1400,7 @@ def test_output_device_change_watcher_fires_on_change() -> None:
         on_change=on_change,
         stop_event=stop,
     )
-    assert fired.wait(2.0), "watcher did not fire on device change"
+    assert fired.wait(2.0), "watcher did not fire on a sustained device change"
     assert seen["device"] == 2
     stop.set()
     thread.join(timeout=1.0)
@@ -1419,3 +1419,94 @@ def test_output_device_change_watcher_stable_no_fire() -> None:
     assert not fired.wait(0.1)
     stop.set()
     thread.join(timeout=1.0)
+
+
+def test_output_device_change_watcher_ignores_single_poll_blip() -> None:
+    """A one-poll excursion to another device id does not restart the process.
+
+    The HAL reports transient device ids mid-playback. Acting on the first
+    differing poll restarted the process hundreds of times, so the watcher must
+    wait for the same new device on consecutive polls.
+    """
+    devices = [1, 2, 1, 1, 1]
+    idx = {"i": 0}
+
+    def fake_get_device() -> int | None:
+        i = idx["i"]
+        idx["i"] = min(i + 1, len(devices) - 1)
+        return devices[i]
+
+    fired = threading.Event()
+    stop = threading.Event()
+    thread = start_output_device_change_watcher(
+        poll_interval_s=0.01,
+        get_device=fake_get_device,
+        on_change=lambda _dev: fired.set(),
+        stop_event=stop,
+    )
+    assert not fired.wait(0.3), "watcher fired on a one-poll blip"
+    stop.set()
+    thread.join(timeout=1.0)
+
+
+def test_output_device_change_watcher_ignores_bouncing_blips() -> None:
+    """A blip that bounces through different ids never reaches a sustained streak.
+
+    This is the observed production pattern (170 -> 126, 125 -> 1543, 125 -> 202,
+    ...), where each poll reports a different non-boot id.
+    """
+    devices = [1, 170, 126, 125, 202, 670, 168, 1]
+    idx = {"i": 0}
+
+    def fake_get_device() -> int | None:
+        i = idx["i"]
+        idx["i"] = min(i + 1, len(devices) - 1)
+        return devices[i]
+
+    fired = threading.Event()
+    stop = threading.Event()
+    thread = start_output_device_change_watcher(
+        poll_interval_s=0.01,
+        get_device=fake_get_device,
+        on_change=lambda _dev: fired.set(),
+        stop_event=stop,
+    )
+    assert not fired.wait(0.4), "watcher fired on bouncing transient blips"
+    stop.set()
+    thread.join(timeout=1.0)
+
+
+def test_output_device_change_watcher_requires_consecutive_polls() -> None:
+    """The same new device must be seen sustained_polls times before firing."""
+    devices = [1, 2, 2, 2]
+    idx = {"i": 0}
+
+    def fake_get_device() -> int | None:
+        i = idx["i"]
+        idx["i"] = min(i + 1, len(devices) - 1)
+        return devices[i]
+
+    fired = threading.Event()
+    stop = threading.Event()
+    thread = start_output_device_change_watcher(
+        poll_interval_s=0.01,
+        get_device=fake_get_device,
+        on_change=lambda _dev: fired.set(),
+        stop_event=stop,
+        sustained_polls=3,
+    )
+    assert fired.wait(2.0), "watcher did not fire after 3 consecutive differing polls"
+    stop.set()
+    thread.join(timeout=1.0)
+
+
+def test_output_device_change_watcher_rejects_invalid_sustained_polls() -> None:
+    """A sustained_polls below 1 is a programming error, not a silent default."""
+    with pytest.raises(ValueError, match="sustained_polls must be >= 1"):
+        start_output_device_change_watcher(
+            poll_interval_s=0.01,
+            get_device=lambda: 1,
+            on_change=lambda _dev: None,
+            stop_event=threading.Event(),
+            sustained_polls=0,
+        )
