@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.25.1
 
 - fix: the audio-device watcher now restarts the process only after the same new default output device is reported on 3 consecutive polls (~6s at the 2.0s interval), instead of on the first differing poll. Transient HAL blips restarted the server ~808 times, each reloading the model and cutting speech in flight; the docstring already promised the sustained-change behaviour, but the code never implemented it.
 
