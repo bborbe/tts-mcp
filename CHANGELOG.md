@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- chore: pin the interpreter to a uv-managed CPython (`[tool.uv] python-preference = "only-managed"`, `.python-version` 3.12.13). The launchd server executed Homebrew's `python@3.12`, so a `brew upgrade` of that formula deleted the Cellar revision out from under the running process; macOS TCC then denied it every path under `~/Documents` and `POST /say` failed with `PermissionError` on the state write while `/health` stayed green — five hours of silence with a healthy-looking server. A uv-managed interpreter lives in `~/.local/share/uv/python/`, which Homebrew never removes.
+
 ## v0.25.1
 
 - fix: the audio-device watcher now restarts the process only after the same new default output device is reported on 3 consecutive polls (~6s at the 2.0s interval), instead of on the first differing poll. Transient HAL blips restarted the server ~808 times, each reloading the model and cutting speech in flight; the docstring already promised the sustained-change behaviour, but the code never implemented it.

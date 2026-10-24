@@ -29,6 +29,12 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
+[tool.uv]
+# Never resolve an interpreter from PATH/Homebrew: a `brew upgrade python@3.12`
+# deletes the Cellar revision a running process executes from, and macOS TCC
+# then denies that process every protected path it touches.
+python-preference = "only-managed"
+
 [project.optional-dependencies]
 dev = [
     # Testing
