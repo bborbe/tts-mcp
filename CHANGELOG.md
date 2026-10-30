@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- fix: resolve the `wezterm` binary explicitly instead of trusting `PATH`. WezTerm.app installs no symlink into any directory on the launchd agent's `PATH`, so `subprocess.run(["wezterm", …])` raised `FileNotFoundError` in production while working from an interactive shell — every row resolved to no pane, so no jump control ever rendered and the feature was dead on the running server despite passing its tests. The candidate list tries a bare `wezterm` first (an operator's own `PATH` wins) and falls back to the Homebrew, `/usr/local`, and app-bundle locations.
+
 ## v0.26.0
 
 - feat: every voice-message row carries a jump control back to the Claude session that spoke it. The MCP `say` handler already read the caller's session id from the request headers and discarded it; it is now stored on the message record (and restored on reload — `load_persisted` rebuilds records field by field, so the field had to be added there too or it would vanish on the next restart). `GET /state` resolves each row's pane in one batched pass and exposes it as `jump_pane`; the UI renders the control only when a pane resolves, so a session that has exited or has no WezTerm pane shows no button rather than one that fails on click. `POST /jump/{message_id}` re-resolves the pane at click time and proxies the activation to the fleet-jump server, whose shared credential never reaches the browser.

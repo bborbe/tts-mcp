@@ -23,6 +23,7 @@ server, and this server asks the jump server.
 import http.client
 import json
 import logging
+import shutil
 import subprocess
 import urllib.error
 import urllib.parse
@@ -46,6 +47,31 @@ WEZTERM_TIMEOUT_SECONDS = 5.0
 # sent to that proxy instead of to 127.0.0.1. An empty ProxyHandler keeps it on
 # the host by construction rather than by the environment's good behaviour.
 _JUMP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# WezTerm.app installs no `wezterm` symlink into any directory on the launchd
+# agent's PATH (`~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`),
+# so `subprocess.run(["wezterm", ...])` raised FileNotFoundError in production
+# while working fine from an interactive shell — every row resolved to no pane
+# and no jump control ever rendered. Resolve the binary explicitly rather than
+# trusting PATH, which is an environment fact this server does not control.
+WEZTERM_CANDIDATES: tuple[str, ...] = (
+    "wezterm",
+    "/opt/homebrew/bin/wezterm",
+    "/usr/local/bin/wezterm",
+    "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+)
+
+
+def wezterm_binary() -> str | None:
+    """The first `wezterm` that actually resolves, or `None` if none does.
+
+    A bare `"wezterm"` is tried first so an operator's own PATH wins; the
+    absolute candidates are the fallbacks that make this work under launchd.
+    """
+    for candidate in WEZTERM_CANDIDATES:
+        if shutil.which(candidate) is not None:
+            return candidate
+    return None
 
 
 def strip_status_glyph(text: str) -> str:
@@ -99,9 +125,13 @@ def list_panes() -> dict[str, str] | None:
     panes exist". `{}` is reserved for a WezTerm that answered with zero panes —
     a real empty answer that must keep working.
     """
+    binary = wezterm_binary()
+    if binary is None:
+        logger.warning("no wezterm binary on PATH or in any known location: %s", WEZTERM_CANDIDATES)
+        return None
     try:
         result = subprocess.run(
-            ["wezterm", "cli", "list", "--format", "json"],
+            [binary, "cli", "list", "--format", "json"],
             capture_output=True,
             text=True,
             timeout=WEZTERM_TIMEOUT_SECONDS,
