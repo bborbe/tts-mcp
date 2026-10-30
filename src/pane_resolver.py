@@ -130,11 +130,10 @@ def resolve_panes(session_ids: Iterable[str], sessions_dir: Path) -> dict[str, s
     """`{session_id: pane_id | None}` for a whole response, in one pass.
 
     One registry read and one `wezterm cli list` regardless of how many ids are
-    asked for — the cost the sibling vault-ui task removed by taking pane data
-    off its list responses entirely. This server keeps the per-row answer
-    because a row whose session has no pane must render no control at all, which
-    a presence-only rule cannot express; the recent list is capped, so one
-    batched read is affordable here.
+    asked for, because the caller polls this endpoint. The per-row answer is
+    kept rather than a presence flag because a row whose session has no pane
+    must render no control at all; the recent list is capped, so one batched
+    read is affordable.
     """
     wanted = [sid for sid in dict.fromkeys(session_ids) if sid]
     if not wanted:

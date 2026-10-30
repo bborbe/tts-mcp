@@ -31,6 +31,10 @@
     }
     h1 { font-size: 20px; margin: 0 0 4px; }
     .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+    /* Transient feedback that must survive the 2s poll. Writing it into #conn
+       instead would be erased by the next poll within two seconds, so the
+       failure a click produced would never be readable. */
+    .notice { color: var(--paused); font-size: 13px; margin-left: 10px; }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -127,7 +131,7 @@
 </head>
 <body>
   <h1>tts-mcp · voice control</h1>
-  <div class="subtitle">Local TTS server · <span id="conn">connecting…</span></div>
+  <div class="subtitle">Local TTS server · <span id="conn">connecting…</span><span class="notice" id="notice"></span></div>
 
   <div class="card">
     <div class="controls">
@@ -162,6 +166,15 @@
       poll();
     }
 
+    // Shown in its own element, not #conn: poll() rewrites #conn every 2s, so a
+    // failure written there would vanish before it could be read.
+    let noticeTimer = null;
+    function notice(text) {
+      $("notice").textContent = text;
+      if (noticeTimer) clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => { $("notice").textContent = ""; }, 6000);
+    }
+
     async function jump(messageId) {
       if (!messageId) return;
       // The server resolves the pane and asks the fleet-jump server to activate
@@ -173,11 +186,10 @@
           // 409 means no pane resolves any more — the session exited, or its
           // pane went away since the list was rendered. Say so plainly rather
           // than reporting a transport failure.
-          const detail = res.status === 409 ? "no pane to jump to" : "jump failed: HTTP " + res.status;
-          $("conn").textContent = detail;
+          notice(res.status === 409 ? "no pane to jump to" : "jump failed: HTTP " + res.status);
         }
       } catch (err) {
-        $("conn").textContent = "jump failed: " + err;
+        notice("jump failed: " + err);
       }
       poll();
     }

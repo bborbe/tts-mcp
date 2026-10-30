@@ -1198,6 +1198,48 @@ class TestReplayHistory:
 
         assert client.post("/jump/does-not-exist").status_code == 404
 
+    def test_jump_activates_the_pane_of_the_speaking_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The happy path: the pane is resolved, activated, and named back.
+
+        The pane id in the response is the whole point — it is how a caller can
+        tell *which* tab came forward rather than only that something happened.
+        Resolver and jump server are stubbed so the test cannot depend on which
+        sessions happen to be running or on the fleet-jump server being up.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: "395")
+        monkeypatch.setattr("src.server.read_jump_token", lambda _path: "token")
+        activated: list[str] = []
+        monkeypatch.setattr("src.server.perform_jump", lambda pane, _token: activated.append(pane))
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        response = client.post(f"/jump/{message_id}")
+
+        assert response.status_code == 200
+        assert response.json() == {"pane_id": "395"}
+        assert activated == ["395"]
+
+    def test_jump_refuses_a_message_whose_pane_no_longer_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A session that has exited since the row rendered is a 409, not a jump.
+
+        The control is drawn from the `/state` snapshot, so by click time the
+        session may be gone. Nothing is activated and the caller is told why.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: None)
+        activated: list[str] = []
+        monkeypatch.setattr("src.server.perform_jump", lambda pane, _token: activated.append(pane))
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        assert client.post(f"/jump/{message_id}").status_code == 409
+        assert activated == []
+
     def test_replay_does_not_evict_originals_from_the_window(self) -> None:
         state = _make_state()
         client = TestClient(_make_app(state))

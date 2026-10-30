@@ -1128,37 +1128,37 @@ def state_endpoint(request: Request) -> StateResponse:
             reverse=True,
         )[:RECENT_HISTORY_LIMIT]
 
-        # One registry read and one `wezterm cli list` for the whole response,
-        # not one subprocess per row: this endpoint is polled. Rows whose
-        # session has no pane get None and render no jump control at all.
         all_msgs = [current] if current is not None else []
         all_msgs = all_msgs + pending_msgs + recent_msgs
-        pane_map = resolve_panes(
-            (ms.session_id for ms in all_msgs if ms.session_id is not None),
-            SESSIONS_DIR,
+        wanted = [ms.session_id for ms in all_msgs if ms.session_id is not None]
+
+    # Resolved OUTSIDE the status lock. `resolve_panes` shells out to
+    # `wezterm cli list` (5s timeout) and reads the session registry, and this
+    # endpoint is polled every 2s — holding the lock across that would stall
+    # every `/say` for as long as a wedged WezTerm takes to answer.
+    pane_map = resolve_panes(wanted, SESSIONS_DIR)
+
+    def to_response(ms: MessageStatus) -> StatusResponse:
+        return StatusResponse(
+            message_id=ms.message_id,
+            status=ms.status,
+            text=ms.text,
+            audio_file=ms.audio_file,
+            error=ms.error,
+            engine=ms.engine,
+            sender=ms.sender,
+            voice=ms.voice,
+            session_id=ms.session_id,
+            jump_pane=pane_map.get(ms.session_id) if ms.session_id is not None else None,
         )
 
-        def to_response(ms: MessageStatus) -> StatusResponse:
-            return StatusResponse(
-                message_id=ms.message_id,
-                status=ms.status,
-                text=ms.text,
-                audio_file=ms.audio_file,
-                error=ms.error,
-                engine=ms.engine,
-                sender=ms.sender,
-                voice=ms.voice,
-                session_id=ms.session_id,
-                jump_pane=pane_map.get(ms.session_id) if ms.session_id is not None else None,
-            )
-
-        return StateResponse(
-            current=to_response(current) if current is not None else None,
-            pending=[to_response(ms) for ms in pending_msgs],
-            recent=[to_response(ms) for ms in recent_msgs],
-            queued=state.work_queue.qsize(),
-            paused=state.is_held(),
-        )
+    return StateResponse(
+        current=to_response(current) if current is not None else None,
+        pending=[to_response(ms) for ms in pending_msgs],
+        recent=[to_response(ms) for ms in recent_msgs],
+        queued=state.work_queue.qsize(),
+        paused=state.is_held(),
+    )
 
 
 @router.get("/status/{message_id}")
@@ -1203,9 +1203,8 @@ def jump(request: Request, message_id: str) -> dict[str, str]:
     rendered, so a `/rename` or a recycled pane id since that render cannot send
     the operator to the wrong tab.
 
-    Returns the activated pane id so the caller — and the acceptance check for
-    this feature — can see *which* pane was targeted, not merely that the call
-    succeeded.
+    Returns the activated pane id, so a caller can see *which* pane was
+    targeted rather than merely that the call succeeded.
     """
     state: ServerState = request.app.state.server
     state.evict_expired()
