@@ -2174,6 +2174,70 @@ class TestPersistence:
             assert ms.sender == "test"
             assert ms.voice == "casual_female"
 
+    def test_load_persisted_restores_session_id(self) -> None:
+        """`session_id` survives the persist -> load round trip.
+
+        The jump control in the web UI points at this field, and `load_persisted`
+        rebuilds every record field by field rather than through `MessageStatus`'s
+        own defaults — so a field added to the dataclass alone is written by
+        `asdict` and then silently dropped on the next restart. This test is the
+        only thing that catches that: the in-memory record carries the id, and so
+        does the reloaded one.
+        """
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_session"] = MessageStatus(
+                message_id="msg_session",
+                status="completed",
+                text="Spoken by a session",
+                audio_file="out.wav",
+                error=None,
+                completed_at=time.time(),
+                engine=VOXTRAL,
+                sender="fleet-manager",
+                voice="casual_female",
+                session_id="94a82c9a-0f03-4f2e-b0e2-48f9e18af19d",
+            )
+        state.persist()
+
+        fresh = _make_state()
+        assert fresh.load_persisted() == 1
+
+        with fresh.status_lock:
+            assert fresh.statuses["msg_session"].session_id == "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+
+    def test_load_persisted_restores_record_without_session_id(self) -> None:
+        """A history record written before `session_id` existed still loads.
+
+        Existing stores hold records with no `session_id` key at all, and a
+        field-by-field rebuild that used `entry["session_id"]` rather than
+        `entry.get(...)` would raise KeyError and drop every one of them.
+        """
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_legacy"] = MessageStatus(
+                message_id="msg_legacy",
+                status="completed",
+                text="Legacy",
+                audio_file=None,
+                error=None,
+                completed_at=time.time(),
+                engine=VOXTRAL,
+                sender="test",
+                voice="casual_female",
+            )
+        state.persist()
+
+        payload = json.loads(server_module.HISTORY_PATH.read_text(encoding="utf-8"))
+        for entry in payload:
+            entry.pop("session_id", None)
+        server_module.HISTORY_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+        fresh = _make_state()
+        assert fresh.load_persisted() == 1
+        with fresh.status_lock:
+            assert fresh.statuses["msg_legacy"].session_id is None
+
     def test_load_persisted_demotes_midflight_to_cancelled(self) -> None:
         state = _make_state()
         with state.status_lock:

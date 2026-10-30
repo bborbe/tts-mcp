@@ -121,6 +121,11 @@ class MessageStatus:
     # Carried so a replay re-speaks in the voice the listener actually heard rather
     # than whatever the default happens to be at replay time.
     voice: str | None = None
+    # The Claude session that spoke this message, carried so the web UI can
+    # offer a jump back to its WezTerm pane. Optional because the HTTP /say
+    # route carries no identity header and history written before this field
+    # existed has none; `None` means the row simply has no jump target.
+    session_id: str | None = None
     # True when this message was queued by the web UI's Replay button. A replay is
     # the same utterance heard again, not a new message, so it is excluded from
     # GET /state's recent list — otherwise replays would evict the very messages
@@ -517,6 +522,7 @@ class ServerState:
                         engine=cast(str | None, entry.get("engine")),
                         sender=cast(str | None, entry.get("sender")),
                         voice=cast(str | None, entry.get("voice")),
+                        session_id=cast(str | None, entry.get("session_id")),
                         is_replay=cast(bool, entry.get("is_replay", False)),
                     )
                 except (KeyError, TypeError):
@@ -750,6 +756,10 @@ class SayRequest(BaseModel):
     instruct: str | None = None
     engine: str | None = None
     sender: str | None = None
+    # The caller's Claude session id, when the transport carried one. The MCP
+    # `say` tool sets it from the request headers; the HTTP /say route leaves it
+    # None because a browser has no identity header to send.
+    session_id: str | None = None
     # Set by the web UI's Replay button. The message is spoken normally but kept
     # out of GET /state's recent list, since a replay is the same utterance heard
     # again rather than a new one.
@@ -802,6 +812,15 @@ class StatusResponse(BaseModel):
     engine: str | None = None
     sender: str | None = None
     voice: str | None = None
+    # The speaking session, so the UI can decide whether to draw a jump control
+    # and where it points. None for records that predate the field and for
+    # messages sent over HTTP without an identity header.
+    session_id: str | None = None
+    # The pane resolved for `session_id` at response time, or None when no pane
+    # resolves. The UI renders the jump control iff this is non-null, so a row
+    # whose session is live-but-pane-less shows no control rather than one that
+    # would fail on click.
+    jump_pane: str | None = None
 
 
 class StateResponse(BaseModel):
@@ -976,6 +995,7 @@ def queue_say(state: ServerState, body: SayRequest) -> SayResponse:
             engine=engine,
             sender=body.sender,
             voice=voice,
+            session_id=body.session_id,
             is_replay=body.replay,
         )
 
@@ -1104,6 +1124,7 @@ def state_endpoint(request: Request) -> StateResponse:
                 engine=ms.engine,
                 sender=ms.sender,
                 voice=ms.voice,
+                session_id=ms.session_id,
             )
 
         return StateResponse(
@@ -2018,7 +2039,7 @@ async def mcp_say(
         sender,
         text[:80],
     )
-    body = SayRequest(text=text, voice=voice, instruct=instruct, engine=engine, sender=attributed)
+    body = SayRequest(text=text, voice=voice, instruct=instruct, engine=engine, sender=attributed, session_id=session_id)
     return await _tool_result(lambda: queue_say(_server_state(), body))
 
 
