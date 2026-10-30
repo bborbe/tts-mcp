@@ -47,6 +47,10 @@ class _Completed:
 
 
 def _stub_wezterm(monkeypatch: pytest.MonkeyPatch, result: _Completed | Exception) -> None:
+    # The binary lookup is stubbed too, so these tests do not depend on WezTerm
+    # being installed on the machine running them.
+    monkeypatch.setattr(pane_resolver, "wezterm_binary", lambda: "/fake/wezterm")
+
     def fake_run(*_args: object, **_kwargs: object) -> _Completed:
         if isinstance(result, Exception):
             raise result
@@ -93,7 +97,48 @@ class TestStripStatusGlyph:
         assert strip_status_glyph("") == ""
 
 
+class TestWeztermBinary:
+    def test_prefers_a_wezterm_on_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pane_resolver.shutil, "which", lambda name: "/on/path/wezterm" if name == "wezterm" else None)
+        assert pane_resolver.wezterm_binary() == "wezterm"
+
+    def test_falls_back_to_the_app_bundle(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The launchd agent's PATH carries no `wezterm`; the bundle is the fallback.
+
+        WezTerm.app installs no symlink into `~/.local/bin`, `/opt/homebrew/bin`
+        or `/usr/local/bin`, which are the only PATH entries the plist sets — so
+        a bare `["wezterm", ...]` raised FileNotFoundError in production while
+        working from an interactive shell, and every row resolved to no pane.
+        """
+        bundle = "/Applications/WezTerm.app/Contents/MacOS/wezterm"
+        monkeypatch.setattr(pane_resolver.shutil, "which", lambda name: bundle if name == bundle else None)
+        assert pane_resolver.wezterm_binary() == bundle
+
+    def test_is_none_when_no_candidate_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pane_resolver.shutil, "which", lambda _name: None)
+        assert pane_resolver.wezterm_binary() is None
+
+
 class TestListPanes:
+    def test_is_none_when_no_binary_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(pane_resolver, "wezterm_binary", lambda: None)
+        assert list_panes() is None
+
+    def test_runs_the_resolved_binary_with_the_json_format(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pins the argv, so a regression to a bare `wezterm` or a lost flag is caught."""
+        calls: list[list[str]] = []
+        bundle = "/Applications/WezTerm.app/Contents/MacOS/wezterm"
+        monkeypatch.setattr(pane_resolver, "wezterm_binary", lambda: bundle)
+
+        def fake_run(argv: list[str], **_kwargs: object) -> _Completed:
+            calls.append(argv)
+            return _Completed(0, stdout="[]")
+
+        monkeypatch.setattr(pane_resolver.subprocess, "run", fake_run)
+
+        assert list_panes() == {}
+        assert calls == [[bundle, "cli", "list", "--format", "json"]]
+
     def test_is_none_when_wezterm_cannot_be_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_wezterm(monkeypatch, OSError("no such binary"))
         assert list_panes() is None
