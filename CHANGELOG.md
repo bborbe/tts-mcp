@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.26.1
 
 - fix: resolve the `wezterm` binary explicitly instead of trusting `PATH`. WezTerm.app installs no symlink into any directory on the launchd agent's `PATH`, so `subprocess.run(["wezterm", …])` raised `FileNotFoundError` in production while working from an interactive shell — every row resolved to no pane, so no jump control ever rendered and the feature was dead on the running server despite passing its tests. The candidate list tries a bare `wezterm` first (an operator's own `PATH` wins) and falls back to the Homebrew, `/usr/local`, and app-bundle locations.
 
