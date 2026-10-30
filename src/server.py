@@ -22,6 +22,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from src.pane_resolver import (
+    pane_for,
+    perform_jump,
+    read_jump_token,
+    resolve_panes,
+)
 from src.session_attribution import (
     SESSION_ID_HEADER,
     attribution_label,
@@ -78,6 +84,14 @@ few minutes of a chatty session. Note STATUS_TTL_SECONDS is the harder ceiling:
 an evicted message has no entry regardless of this value.
 """
 
+JUMP_TOKEN_PATH: Path = Path.home() / ".claude" / "secrets" / "jump-token"
+"""The shared credential the fleet-jump server requires.
+
+Read on the server, handed to the jump server, and never returned to the
+browser: the whole reason a jump is proxied here rather than attempted from the
+page is that this value must not reach it.
+"""
+
 HISTORY_PATH: Path = Path("data/history.json")
 """Where the message-status history is persisted between server runs.
 
@@ -121,6 +135,11 @@ class MessageStatus:
     # Carried so a replay re-speaks in the voice the listener actually heard rather
     # than whatever the default happens to be at replay time.
     voice: str | None = None
+    # The Claude session that spoke this message, carried so the web UI can
+    # offer a jump back to its WezTerm pane. Optional because the HTTP /say
+    # route carries no identity header and history written before this field
+    # existed has none; `None` means the row simply has no jump target.
+    session_id: str | None = None
     # True when this message was queued by the web UI's Replay button. A replay is
     # the same utterance heard again, not a new message, so it is excluded from
     # GET /state's recent list — otherwise replays would evict the very messages
@@ -517,6 +536,7 @@ class ServerState:
                         engine=cast(str | None, entry.get("engine")),
                         sender=cast(str | None, entry.get("sender")),
                         voice=cast(str | None, entry.get("voice")),
+                        session_id=cast(str | None, entry.get("session_id")),
                         is_replay=cast(bool, entry.get("is_replay", False)),
                     )
                 except (KeyError, TypeError):
@@ -750,6 +770,10 @@ class SayRequest(BaseModel):
     instruct: str | None = None
     engine: str | None = None
     sender: str | None = None
+    # The caller's Claude session id, when the transport carried one. The MCP
+    # `say` tool sets it from the request headers; the HTTP /say route leaves it
+    # None because a browser has no identity header to send.
+    session_id: str | None = None
     # Set by the web UI's Replay button. The message is spoken normally but kept
     # out of GET /state's recent list, since a replay is the same utterance heard
     # again rather than a new one.
@@ -802,6 +826,15 @@ class StatusResponse(BaseModel):
     engine: str | None = None
     sender: str | None = None
     voice: str | None = None
+    # The speaking session, so the UI can decide whether to draw a jump control
+    # and where it points. None for records that predate the field and for
+    # messages sent over HTTP without an identity header.
+    session_id: str | None = None
+    # The pane resolved for `session_id` at response time, or None when no pane
+    # resolves. The UI renders the jump control iff this is non-null, so a row
+    # whose session is live-but-pane-less shows no control rather than one that
+    # would fail on click.
+    jump_pane: str | None = None
 
 
 class StateResponse(BaseModel):
@@ -976,6 +1009,7 @@ def queue_say(state: ServerState, body: SayRequest) -> SayResponse:
             engine=engine,
             sender=body.sender,
             voice=voice,
+            session_id=body.session_id,
             is_replay=body.replay,
         )
 
@@ -1094,25 +1128,37 @@ def state_endpoint(request: Request) -> StateResponse:
             reverse=True,
         )[:RECENT_HISTORY_LIMIT]
 
-        def to_response(ms: MessageStatus) -> StatusResponse:
-            return StatusResponse(
-                message_id=ms.message_id,
-                status=ms.status,
-                text=ms.text,
-                audio_file=ms.audio_file,
-                error=ms.error,
-                engine=ms.engine,
-                sender=ms.sender,
-                voice=ms.voice,
-            )
+        all_msgs = [current] if current is not None else []
+        all_msgs = all_msgs + pending_msgs + recent_msgs
+        wanted = [ms.session_id for ms in all_msgs if ms.session_id is not None]
 
-        return StateResponse(
-            current=to_response(current) if current is not None else None,
-            pending=[to_response(ms) for ms in pending_msgs],
-            recent=[to_response(ms) for ms in recent_msgs],
-            queued=state.work_queue.qsize(),
-            paused=state.is_held(),
+    # Resolved OUTSIDE the status lock. `resolve_panes` shells out to
+    # `wezterm cli list` (5s timeout) and reads the session registry, and this
+    # endpoint is polled every 2s — holding the lock across that would stall
+    # every `/say` for as long as a wedged WezTerm takes to answer.
+    pane_map = resolve_panes(wanted, SESSIONS_DIR)
+
+    def to_response(ms: MessageStatus) -> StatusResponse:
+        return StatusResponse(
+            message_id=ms.message_id,
+            status=ms.status,
+            text=ms.text,
+            audio_file=ms.audio_file,
+            error=ms.error,
+            engine=ms.engine,
+            sender=ms.sender,
+            voice=ms.voice,
+            session_id=ms.session_id,
+            jump_pane=pane_map.get(ms.session_id) if ms.session_id is not None else None,
         )
+
+    return StateResponse(
+        current=to_response(current) if current is not None else None,
+        pending=[to_response(ms) for ms in pending_msgs],
+        recent=[to_response(ms) for ms in recent_msgs],
+        queued=state.work_queue.qsize(),
+        paused=state.is_held(),
+    )
 
 
 @router.get("/status/{message_id}")
@@ -1140,7 +1186,52 @@ def message_status(state: ServerState, message_id: str) -> StatusResponse:
         engine=ms.engine,
         sender=ms.sender,
         voice=ms.voice,
+        session_id=ms.session_id,
+        jump_pane=pane_for(ms.session_id, SESSIONS_DIR) if ms.session_id is not None else None,
     )
+
+
+@router.post("/jump/{message_id}")
+def jump(request: Request, message_id: str) -> dict[str, str]:
+    """Activate the WezTerm pane of the session that spoke ``message_id``.
+
+    The jump is proxied here rather than attempted from the page: the fleet-jump
+    server needs a shared credential, and that credential must never reach the
+    browser. The browser asks this server; this server asks the jump server.
+
+    The pane is re-resolved at click time rather than taken from the row the UI
+    rendered, so a `/rename` or a recycled pane id since that render cannot send
+    the operator to the wrong tab.
+
+    Returns the activated pane id, so a caller can see *which* pane was
+    targeted rather than merely that the call succeeded.
+    """
+    state: ServerState = request.app.state.server
+    state.evict_expired()
+
+    with state.status_lock:
+        ms = state.statuses.get(message_id)
+
+    if ms is None:
+        raise HTTPException(status_code=404, detail=f"Unknown message ID: {message_id}")
+    if ms.session_id is None:
+        raise HTTPException(status_code=409, detail="this message carries no session id")
+
+    pane_id = pane_for(ms.session_id, SESSIONS_DIR)
+    if pane_id is None:
+        raise HTTPException(status_code=409, detail=f"no pane resolves for session {ms.session_id}")
+
+    token = read_jump_token(JUMP_TOKEN_PATH)
+    if token is None:
+        raise HTTPException(status_code=503, detail="jump credential unreadable")
+
+    try:
+        perform_jump(pane_id, token)
+    except RuntimeError as err:
+        raise HTTPException(status_code=502, detail=str(err)) from err
+
+    logger.info("jumped to pane %s for message %s (session %s)", pane_id, message_id, ms.session_id)
+    return {"pane_id": pane_id}
 
 
 def _fail_item(state: ServerState, message_id: str, error: str) -> None:
@@ -2018,7 +2109,7 @@ async def mcp_say(
         sender,
         text[:80],
     )
-    body = SayRequest(text=text, voice=voice, instruct=instruct, engine=engine, sender=attributed)
+    body = SayRequest(text=text, voice=voice, instruct=instruct, engine=engine, sender=attributed, session_id=session_id)
     return await _tool_result(lambda: queue_say(_server_state(), body))
 
 

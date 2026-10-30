@@ -124,6 +124,25 @@ class TestSayAttribution:
         with state.status_lock:
             return state.statuses[message_id].sender
 
+    def _session_id_of(self, state: Any, message_id: str) -> str | None:
+        with state.status_lock:
+            return state.statuses[message_id].session_id
+
+    def test_carries_the_calling_session_id_onto_the_record(self, state: Any, sessions_dir: Path) -> None:
+        """The header is the only place a spoken message's session id comes from.
+
+        Every other test seeds `session_id` through the `/say` JSON body, which
+        no Claude session ever sends — so this is the only test that fails if
+        `mcp_say` stops passing the header-derived value through, leaving the
+        jump control dead for every message a session actually speaks.
+        """
+        said = json.loads(_run(mcp_say(voice="casual_female", text="one", ctx=_ctx({"x-claude-code-session-id": "aaa"}))))
+        assert self._session_id_of(state, said["message_id"]) == "aaa"
+
+    def test_carries_no_session_id_without_the_header(self, state: Any, sessions_dir: Path) -> None:
+        said = json.loads(_run(mcp_say(voice="casual_female", text="one", ctx=_ctx({}))))
+        assert self._session_id_of(state, said["message_id"]) is None
+
     def test_each_session_gets_its_own_name(self, state: Any, sessions_dir: Path) -> None:
         a = json.loads(_run(mcp_say(voice="casual_female", text="one", ctx=_ctx({"x-claude-code-session-id": "aaa"}))))
         b = json.loads(_run(mcp_say(voice="casual_female", text="two", ctx=_ctx({"x-claude-code-session-id": "bbb"}))))

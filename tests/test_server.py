@@ -1141,6 +1141,157 @@ class TestReplayHistory:
         recent = client.get("/state").json()["recent"]
         assert [m["message_id"] for m in recent] == [message_id]
 
+    def test_state_carries_session_id_and_the_resolved_jump_pane(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row's session id and its resolved pane both reach `/state`.
+
+        The UI renders the jump control iff `jump_pane` is non-null, so the value
+        has to be on the row. The resolver is stubbed here: reading the real
+        registry and the operator's live WezTerm would make this test depend on
+        whichever sessions happen to be running.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        seen: list[str] = []
+
+        def fake_resolve(ids: Any, _dir: Any) -> dict[str, str | None]:
+            seen.extend(ids)
+            return {sid: "395"}
+
+        monkeypatch.setattr("src.server.resolve_panes", fake_resolve)
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+        with state.status_lock:
+            state.statuses[message_id].completed_at = time.time()
+
+        row = client.get("/state").json()["recent"][0]
+        assert row["message_id"] == message_id
+        assert row["session_id"] == sid
+        assert row["jump_pane"] == "395"
+        # The row's id must actually be forwarded to the resolver; a stub that
+        # ignores its argument would pass even if the endpoint never batched.
+        assert set(seen) == {sid}
+
+    def test_state_row_has_no_jump_pane_when_none_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row whose session resolves no pane carries `None`, not a guess.
+
+        `None` is what makes the UI omit the control entirely; a disabled button
+        would invite a click that cannot work.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        seen: list[str] = []
+
+        def fake_resolve(ids: Any, _dir: Any) -> dict[str, str | None]:
+            seen.extend(ids)
+            return {sid: None}
+
+        monkeypatch.setattr("src.server.resolve_panes", fake_resolve)
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+        with state.status_lock:
+            state.statuses[message_id].completed_at = time.time()
+
+        row = client.get("/state").json()["recent"][0]
+        assert row["session_id"] == sid
+        assert row["jump_pane"] is None
+        assert set(seen) == {sid}
+
+    def test_jump_refuses_a_message_with_no_session_id(self) -> None:
+        """A message sent without an identity header cannot be jumped from."""
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello"}).json()["message_id"]
+
+        response = client.post(f"/jump/{message_id}")
+        assert response.status_code == 409
+
+    def test_jump_refuses_an_unknown_message(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        assert client.post("/jump/does-not-exist").status_code == 404
+
+    def test_jump_activates_the_pane_of_the_speaking_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The happy path: the pane is resolved, activated, and named back.
+
+        The pane id in the response is the whole point — it is how a caller can
+        tell *which* tab came forward rather than only that something happened.
+        Resolver and jump server are stubbed so the test cannot depend on which
+        sessions happen to be running or on the fleet-jump server being up.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: "395")
+        monkeypatch.setattr("src.server.read_jump_token", lambda _path: "token")
+        activated: list[str] = []
+        monkeypatch.setattr("src.server.perform_jump", lambda pane, _token: activated.append(pane))
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        response = client.post(f"/jump/{message_id}")
+
+        assert response.status_code == 200
+        assert response.json() == {"pane_id": "395"}
+        assert activated == ["395"]
+
+    def test_jump_refuses_a_message_whose_pane_no_longer_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A session that has exited since the row rendered is a 409, not a jump.
+
+        The control is drawn from the `/state` snapshot, so by click time the
+        session may be gone. Nothing is activated and the caller is told why.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: None)
+        activated: list[str] = []
+        monkeypatch.setattr("src.server.perform_jump", lambda pane, _token: activated.append(pane))
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        assert client.post(f"/jump/{message_id}").status_code == 409
+        assert activated == []
+
+    def test_jump_reports_an_unreadable_credential_as_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A missing credential is the server's problem, not the caller's.
+
+        503 rather than 409: nothing about the message or the pane is wrong, so
+        telling the operator "no pane to jump to" would send them hunting the
+        wrong thing.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: "395")
+        monkeypatch.setattr("src.server.read_jump_token", lambda _path: None)
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        assert client.post(f"/jump/{message_id}").status_code == 503
+
+    def test_jump_reports_a_jump_server_failure_as_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A reachable pane and credential, but the jump server refuses — 502."""
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: "395")
+        monkeypatch.setattr("src.server.read_jump_token", lambda _path: "token")
+
+        def refuse(_pane: str, _token: str) -> None:
+            raise RuntimeError("jump server returned HTTP 403")
+
+        monkeypatch.setattr("src.server.perform_jump", refuse)
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        response = client.post(f"/jump/{message_id}")
+        assert response.status_code == 502
+        assert "403" in response.json()["detail"]
+
     def test_replay_does_not_evict_originals_from_the_window(self) -> None:
         state = _make_state()
         client = TestClient(_make_app(state))
@@ -2173,6 +2324,70 @@ class TestPersistence:
             assert ms.text == "Done"
             assert ms.sender == "test"
             assert ms.voice == "casual_female"
+
+    def test_load_persisted_restores_session_id(self) -> None:
+        """`session_id` survives the persist -> load round trip.
+
+        The jump control in the web UI points at this field, and `load_persisted`
+        rebuilds every record field by field rather than through `MessageStatus`'s
+        own defaults — so a field added to the dataclass alone is written by
+        `asdict` and then silently dropped on the next restart. This test is the
+        only thing that catches that: the in-memory record carries the id, and so
+        does the reloaded one.
+        """
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_session"] = MessageStatus(
+                message_id="msg_session",
+                status="completed",
+                text="Spoken by a session",
+                audio_file="out.wav",
+                error=None,
+                completed_at=time.time(),
+                engine=VOXTRAL,
+                sender="fleet-manager",
+                voice="casual_female",
+                session_id="94a82c9a-0f03-4f2e-b0e2-48f9e18af19d",
+            )
+        state.persist()
+
+        fresh = _make_state()
+        assert fresh.load_persisted() == 1
+
+        with fresh.status_lock:
+            assert fresh.statuses["msg_session"].session_id == "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+
+    def test_load_persisted_restores_record_without_session_id(self) -> None:
+        """A history record written before `session_id` existed still loads.
+
+        Existing stores hold records with no `session_id` key at all, and a
+        field-by-field rebuild that used `entry["session_id"]` rather than
+        `entry.get(...)` would raise KeyError and drop every one of them.
+        """
+        state = _make_state()
+        with state.status_lock:
+            state.statuses["msg_legacy"] = MessageStatus(
+                message_id="msg_legacy",
+                status="completed",
+                text="Legacy",
+                audio_file=None,
+                error=None,
+                completed_at=time.time(),
+                engine=VOXTRAL,
+                sender="test",
+                voice="casual_female",
+            )
+        state.persist()
+
+        payload = json.loads(server_module.HISTORY_PATH.read_text(encoding="utf-8"))
+        for entry in payload:
+            entry.pop("session_id", None)
+        server_module.HISTORY_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+        fresh = _make_state()
+        assert fresh.load_persisted() == 1
+        with fresh.status_lock:
+            assert fresh.statuses["msg_legacy"].session_id is None
 
     def test_load_persisted_demotes_midflight_to_cancelled(self) -> None:
         state = _make_state()

@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: every voice-message row carries a jump control back to the Claude session that spoke it. The MCP `say` handler already read the caller's session id from the request headers and discarded it; it is now stored on the message record (and restored on reload — `load_persisted` rebuilds records field by field, so the field had to be added there too or it would vanish on the next restart). `GET /state` resolves each row's pane in one batched pass and exposes it as `jump_pane`; the UI renders the control only when a pane resolves, so a session that has exited or has no WezTerm pane shows no button rather than one that fails on click. `POST /jump/{message_id}` re-resolves the pane at click time and proxies the activation to the fleet-jump server, whose shared credential never reaches the browser.
+
 ## v0.25.2
 
 - chore: pin the interpreter to a uv-managed CPython (`[tool.uv] python-preference = "only-managed"`, `.python-version` 3.12.13). The launchd server executed Homebrew's `python@3.12`, so a `brew upgrade` of that formula deleted the Cellar revision out from under the running process; macOS TCC then denied it every path under `~/Documents` and `POST /say` failed with `PermissionError` on the state write while `/health` stayed green — five hours of silence with a healthy-looking server. A uv-managed interpreter lives in `~/.local/share/uv/python/`, which Homebrew never removes.

@@ -31,6 +31,10 @@
     }
     h1 { font-size: 20px; margin: 0 0 4px; }
     .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+    /* Transient feedback that must survive the 2s poll. Writing it into #conn
+       instead would be erased by the next poll within two seconds, so the
+       failure a click produced would never be readable. */
+    .notice { color: var(--paused); font-size: 13px; margin-left: 10px; }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -86,6 +90,23 @@
       background: var(--border);
       color: var(--text);
     }
+    /* Drawn only on a row whose session resolves a pane, so its presence is
+       itself the signal that a jump is possible. */
+    button.jump {
+      margin-top: 0;
+      margin-left: auto;
+      padding: 0;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      font-size: 12px;
+      line-height: 1;
+      background: var(--border);
+      color: var(--text);
+    }
+    /* When the row also carries a Replay button the jump keeps the group right
+       and Replay sits beside it, rather than the two splitting the free space. */
+    button.jump + button.replay { margin-left: 6px; }
     .history-item {
       padding: 10px 0;
       border-bottom: 1px solid var(--border);
@@ -110,7 +131,7 @@
 </head>
 <body>
   <h1>tts-mcp · voice control</h1>
-  <div class="subtitle">Local TTS server · <span id="conn">connecting…</span></div>
+  <div class="subtitle">Local TTS server · <span id="conn">connecting…</span><span class="notice" id="notice" role="status" aria-live="polite"></span></div>
 
   <div class="card">
     <div class="controls">
@@ -141,6 +162,34 @@
       const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
       if (!res.ok) {
         $("conn").textContent = "HTTP " + res.status;
+      }
+      poll();
+    }
+
+    // Shown in its own element, not #conn: poll() rewrites #conn every 2s, so a
+    // failure written there would vanish before it could be read.
+    let noticeTimer = null;
+    function notice(text) {
+      $("notice").textContent = text;
+      if (noticeTimer) clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => { $("notice").textContent = ""; }, 6000);
+    }
+
+    async function jump(messageId) {
+      if (!messageId) return;
+      // The server resolves the pane and asks the fleet-jump server to activate
+      // it. The page never talks to the jump server directly: that call needs a
+      // shared credential, and the credential must not reach the browser.
+      try {
+        const res = await fetch("/jump/" + encodeURIComponent(messageId), { method: "POST" });
+        if (!res.ok) {
+          // 409 means no pane resolves any more — the session exited, or its
+          // pane went away since the list was rendered. Say so plainly rather
+          // than reporting a transport failure.
+          notice(res.status === 409 ? "no pane to jump to" : "jump failed: HTTP " + res.status);
+        }
+      } catch (err) {
+        notice("jump failed: " + err);
       }
       poll();
     }
@@ -194,9 +243,15 @@
       const replay = replayIndex !== undefined
         ? '<button class="replay" data-i="' + replayIndex + '" title="Speak this message again">Replay</button>'
         : "";
+      // Rendered iff the server resolved a pane for this row's session. A row
+      // whose session is gone, or live with no WezTerm pane, carries no control
+      // at all — a disabled button would invite a click that cannot work.
+      const jump = m.jump_pane
+        ? '<button class="jump" data-id="' + escapeAttr(m.message_id) + '" title="Jump to the session that spoke this">↗</button>'
+        : "";
       return (
         '<div class="history-item">' +
-          '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span>" + sender + replay +
+          '<div class="history-meta">' + badge + "<span>" + (m.engine || "") + "</span>" + sender + jump + replay +
           "</div>" +
           '<div class="history-text">' + escapeHtml(m.text) + "</div>" +
         "</div>"
@@ -254,6 +309,11 @@
       // time.
       history.querySelectorAll("button.replay").forEach((btn) => {
         btn.addEventListener("click", () => replay(data.recent[Number(btn.dataset.i)]));
+      });
+      // Bound by message id, not by row index: the row a jump belongs to may be
+      // in pending, current or recent, and the id is the one handle they share.
+      history.querySelectorAll("button.jump").forEach((btn) => {
+        btn.addEventListener("click", () => jump(btn.dataset.id));
       });
     }
 
