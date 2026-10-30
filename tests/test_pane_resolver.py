@@ -13,6 +13,9 @@ on a working machine, or keeps them on a broken one.
 
 from __future__ import annotations
 
+import email.message
+import http.client
+import io
 import json
 import urllib.error
 from pathlib import Path
@@ -23,6 +26,7 @@ import pytest
 from src import pane_resolver
 from src.pane_resolver import (
     JUMP_SERVER_URL,
+    JUMP_TIMEOUT_SECONDS,
     list_panes,
     pane_for,
     perform_jump,
@@ -63,14 +67,16 @@ class _Response:
 
 
 class _Opener:
-    """Records the URL it was asked to open, then yields a canned result."""
+    """Records the URL and timeout it was asked to open, then yields a canned result."""
 
     def __init__(self, result: _Response | Exception) -> None:
         self.calls: list[str] = []
+        self.timeouts: list[float | None] = []
         self._result = result
 
-    def open(self, url: str, timeout: float | None = None) -> Any:  # noqa: ARG002
+    def open(self, url: str, timeout: float | None = None) -> Any:
         self.calls.append(url)
+        self.timeouts.append(timeout)
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -129,10 +135,25 @@ class TestReadRegistry:
 
 
 class TestResolvePanes:
-    def test_matches_through_the_status_glyph_on_either_side(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_matches_through_a_glyph_on_the_pane_title(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         (tmp_path / "a.json").write_text(json.dumps({"sessionId": "sid-a", "name": "Alpha"}), encoding="utf-8")
         _stub_wezterm(monkeypatch, _Completed(0, stdout=json.dumps([{"pane_id": 7, "title": "✳ Alpha"}])))
         assert resolve_panes(["sid-a"], tmp_path) == {"sid-a": "7"}
+
+    def test_matches_through_a_glyph_on_the_registry_name(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        (tmp_path / "a.json").write_text(json.dumps({"sessionId": "sid-a", "name": "✳ Alpha"}), encoding="utf-8")
+        _stub_wezterm(monkeypatch, _Completed(0, stdout=json.dumps([{"pane_id": 7, "title": "Alpha"}])))
+        assert resolve_panes(["sid-a"], tmp_path) == {"sid-a": "7"}
+
+    def test_refuses_a_name_that_strips_to_nothing(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        """An all-glyph name strips to `""`, which is also the key an untitled pane lands under.
+
+        Without the guard, that collision returns the untitled pane as a valid
+        target — the wrong-pane jump the ambiguity check exists to prevent.
+        """
+        (tmp_path / "a.json").write_text(json.dumps({"sessionId": "sid-a", "name": "✳"}), encoding="utf-8")
+        _stub_wezterm(monkeypatch, _Completed(0, stdout=json.dumps([{"pane_id": 7, "title": ""}])))
+        assert resolve_panes(["sid-a"], tmp_path) == {"sid-a": None}
 
     def test_refuses_an_ambiguous_match_rather_than_guessing(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Two panes carrying the same title is no target, not the first one."""
@@ -188,9 +209,11 @@ class TestPerformJump:
         perform_jump("395", "a&b=c")
 
         assert opener.calls == [f"{JUMP_SERVER_URL}?pane=395&t=a%26b%3Dc"]
+        assert opener.timeouts == [JUMP_TIMEOUT_SECONDS]
 
     def test_raises_on_an_http_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        opener = _Opener(urllib.error.HTTPError(JUMP_SERVER_URL, 403, "forbidden", {}, None))  # type: ignore[arg-type]
+        error = urllib.error.HTTPError(JUMP_SERVER_URL, 403, "forbidden", email.message.Message(), io.BytesIO())
+        opener = _Opener(error)
         monkeypatch.setattr(pane_resolver, "_JUMP_OPENER", opener)
 
         with pytest.raises(RuntimeError, match="HTTP 403"):
@@ -208,6 +231,26 @@ class TestPerformJump:
         monkeypatch.setattr(pane_resolver, "_JUMP_OPENER", opener)
 
         with pytest.raises(RuntimeError, match="HTTP 204"):
+            perform_jump("395", "tok")
+
+    def test_raises_when_the_read_times_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A read timeout comes from `getresponse()`, so it is not a `URLError`.
+
+        urllib wraps only the request call; unmapped, this would be a 500 where
+        the route promises a 502.
+        """
+        opener = _Opener(TimeoutError("timed out"))
+        monkeypatch.setattr(pane_resolver, "_JUMP_OPENER", opener)
+
+        with pytest.raises(RuntimeError, match="timed out"):
+            perform_jump("395", "tok")
+
+    def test_raises_on_a_malformed_status_line(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`http.client.HTTPException` is not an `OSError` either."""
+        opener = _Opener(http.client.BadStatusLine("garbage"))
+        monkeypatch.setattr(pane_resolver, "_JUMP_OPENER", opener)
+
+        with pytest.raises(RuntimeError, match="jump server call failed"):
             perform_jump("395", "tok")
 
     def test_never_mentions_the_token_in_the_error(self, monkeypatch: pytest.MonkeyPatch) -> None:

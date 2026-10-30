@@ -20,6 +20,7 @@ credential. The credential never reaches the browser — the browser asks this
 server, and this server asks the jump server.
 """
 
+import http.client
 import json
 import logging
 import subprocess
@@ -164,7 +165,16 @@ def resolve_panes(session_ids: Iterable[str], sessions_dir: Path) -> dict[str, s
             logger.debug("session %s has no registry entry; no pane", session_id)
             resolved[session_id] = None
             continue
-        matches = by_title.get(strip_status_glyph(name), [])
+        stripped = strip_status_glyph(name)
+        if not stripped:
+            # A name made only of glyphs strips to the empty string, and
+            # `list_panes` files a pane with no title under that same empty key
+            # — so the lookup would match it and jump to an arbitrary pane,
+            # which is exactly what the ambiguity guard below exists to refuse.
+            logger.debug("session %s (%r) has no usable name; no jump target", session_id, name)
+            resolved[session_id] = None
+            continue
+        matches = by_title.get(stripped, [])
         if len(matches) != 1:
             # Zero is "no pane"; more than one is ambiguous and must not be
             # guessed at, since jumping to the wrong pane is worse than none.
@@ -215,5 +225,12 @@ def perform_jump(pane_id: str, token: str) -> None:
         raise RuntimeError(f"jump server returned HTTP {err.code}") from err
     except urllib.error.URLError as err:
         raise RuntimeError(f"jump server unreachable: {err.reason}") from err
+    except (OSError, http.client.HTTPException) as err:
+        # urllib wraps only the connect-and-send in URLError. Failures raised by
+        # `getresponse()` escape raw: a read timeout is a `TimeoutError`, a
+        # dropped connection a `RemoteDisconnected`, a malformed status line an
+        # `http.client.HTTPException`. Unmapped, each would surface as a 500
+        # where the route promises a 502 for every transport failure.
+        raise RuntimeError(f"jump server call failed: {err}") from err
     if status != 200:
         raise RuntimeError(f"jump server returned HTTP {status}")
