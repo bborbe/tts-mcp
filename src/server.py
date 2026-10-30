@@ -22,6 +22,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from src.pane_resolver import (
+    pane_for,
+    perform_jump,
+    read_jump_token,
+    resolve_panes,
+)
 from src.session_attribution import (
     SESSION_ID_HEADER,
     attribution_label,
@@ -76,6 +82,14 @@ The web UI renders one Replay button per entry, so this is also how far back a
 message stays re-speakable. Raised from 10 on 2026-08-29 because 10 covers only a
 few minutes of a chatty session. Note STATUS_TTL_SECONDS is the harder ceiling:
 an evicted message has no entry regardless of this value.
+"""
+
+JUMP_TOKEN_PATH: Path = Path.home() / ".claude" / "secrets" / "jump-token"
+"""The shared credential the fleet-jump server requires.
+
+Read on the server, handed to the jump server, and never returned to the
+browser: the whole reason a jump is proxied here rather than attempted from the
+page is that this value must not reach it.
 """
 
 HISTORY_PATH: Path = Path("data/history.json")
@@ -1114,6 +1128,16 @@ def state_endpoint(request: Request) -> StateResponse:
             reverse=True,
         )[:RECENT_HISTORY_LIMIT]
 
+        # One registry read and one `wezterm cli list` for the whole response,
+        # not one subprocess per row: this endpoint is polled. Rows whose
+        # session has no pane get None and render no jump control at all.
+        all_msgs = [current] if current is not None else []
+        all_msgs = all_msgs + pending_msgs + recent_msgs
+        pane_map = resolve_panes(
+            (ms.session_id for ms in all_msgs if ms.session_id is not None),
+            SESSIONS_DIR,
+        )
+
         def to_response(ms: MessageStatus) -> StatusResponse:
             return StatusResponse(
                 message_id=ms.message_id,
@@ -1125,6 +1149,7 @@ def state_endpoint(request: Request) -> StateResponse:
                 sender=ms.sender,
                 voice=ms.voice,
                 session_id=ms.session_id,
+                jump_pane=pane_map.get(ms.session_id) if ms.session_id is not None else None,
             )
 
         return StateResponse(
@@ -1161,7 +1186,53 @@ def message_status(state: ServerState, message_id: str) -> StatusResponse:
         engine=ms.engine,
         sender=ms.sender,
         voice=ms.voice,
+        session_id=ms.session_id,
+        jump_pane=pane_for(ms.session_id, SESSIONS_DIR) if ms.session_id is not None else None,
     )
+
+
+@router.post("/jump/{message_id}")
+def jump(request: Request, message_id: str) -> dict[str, str]:
+    """Activate the WezTerm pane of the session that spoke ``message_id``.
+
+    The jump is proxied here rather than attempted from the page: the fleet-jump
+    server needs a shared credential, and that credential must never reach the
+    browser. The browser asks this server; this server asks the jump server.
+
+    The pane is re-resolved at click time rather than taken from the row the UI
+    rendered, so a `/rename` or a recycled pane id since that render cannot send
+    the operator to the wrong tab.
+
+    Returns the activated pane id so the caller — and the acceptance check for
+    this feature — can see *which* pane was targeted, not merely that the call
+    succeeded.
+    """
+    state: ServerState = request.app.state.server
+    state.evict_expired()
+
+    with state.status_lock:
+        ms = state.statuses.get(message_id)
+
+    if ms is None:
+        raise HTTPException(status_code=404, detail=f"Unknown message ID: {message_id}")
+    if ms.session_id is None:
+        raise HTTPException(status_code=409, detail="this message carries no session id")
+
+    pane_id = pane_for(ms.session_id, SESSIONS_DIR)
+    if pane_id is None:
+        raise HTTPException(status_code=409, detail=f"no pane resolves for session {ms.session_id}")
+
+    token = read_jump_token(JUMP_TOKEN_PATH)
+    if token is None:
+        raise HTTPException(status_code=503, detail="jump credential unreadable")
+
+    try:
+        perform_jump(pane_id, token)
+    except RuntimeError as err:
+        raise HTTPException(status_code=502, detail=str(err)) from err
+
+    logger.info("jumped to pane %s for message %s (session %s)", pane_id, message_id, ms.session_id)
+    return {"pane_id": pane_id}
 
 
 def _fail_item(state: ServerState, message_id: str, error: str) -> None:

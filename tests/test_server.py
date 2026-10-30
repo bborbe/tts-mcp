@@ -1141,6 +1141,63 @@ class TestReplayHistory:
         recent = client.get("/state").json()["recent"]
         assert [m["message_id"] for m in recent] == [message_id]
 
+    def test_state_carries_session_id_and_the_resolved_jump_pane(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row's session id and its resolved pane both reach `/state`.
+
+        The UI renders the jump control iff `jump_pane` is non-null, so the value
+        has to be on the row. The resolver is stubbed here: reading the real
+        registry and the operator's live WezTerm would make this test depend on
+        whichever sessions happen to be running.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.resolve_panes", lambda ids, _dir: {sid: "395"})
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+        with state.status_lock:
+            state.statuses[message_id].completed_at = time.time()
+
+        row = client.get("/state").json()["recent"][0]
+        assert row["message_id"] == message_id
+        assert row["session_id"] == sid
+        assert row["jump_pane"] == "395"
+
+    def test_state_row_has_no_jump_pane_when_none_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row whose session resolves no pane carries `None`, not a guess.
+
+        `None` is what makes the UI omit the control entirely; a disabled button
+        would invite a click that cannot work.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.resolve_panes", lambda ids, _dir: {sid: None})
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+        with state.status_lock:
+            state.statuses[message_id].completed_at = time.time()
+
+        row = client.get("/state").json()["recent"][0]
+        assert row["session_id"] == sid
+        assert row["jump_pane"] is None
+
+    def test_jump_refuses_a_message_with_no_session_id(self) -> None:
+        """A message sent without an identity header cannot be jumped from."""
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        message_id = client.post("/say", json={"text": "Hello"}).json()["message_id"]
+
+        response = client.post(f"/jump/{message_id}")
+        assert response.status_code == 409
+
+    def test_jump_refuses_an_unknown_message(self) -> None:
+        state = _make_state()
+        client = TestClient(_make_app(state))
+
+        assert client.post("/jump/does-not-exist").status_code == 404
+
     def test_replay_does_not_evict_originals_from_the_window(self) -> None:
         state = _make_state()
         client = TestClient(_make_app(state))
