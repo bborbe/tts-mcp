@@ -39,6 +39,13 @@ JUMP_SERVER_URL = "http://127.0.0.1:1337/jump"
 JUMP_TIMEOUT_SECONDS = 5.0
 WEZTERM_TIMEOUT_SECONDS = 5.0
 
+# The default urllib opener honours `http_proxy` / `no_proxy` from the
+# environment, so on a machine with a proxy configured and no loopback bypass
+# this request — whose query string carries the shared credential — would be
+# sent to that proxy instead of to 127.0.0.1. An empty ProxyHandler keeps it on
+# the host by construction rather than by the environment's good behaviour.
+_JUMP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def strip_status_glyph(text: str) -> str:
     """A name without Claude Code's leading status glyph.
@@ -161,7 +168,7 @@ def resolve_panes(session_ids: Iterable[str], sessions_dir: Path) -> dict[str, s
         if len(matches) != 1:
             # Zero is "no pane"; more than one is ambiguous and must not be
             # guessed at, since jumping to the wrong pane is worse than none.
-            logger.info("session %s (%r) matched %d panes; no jump target", session_id, name, len(matches))
+            logger.debug("session %s (%r) matched %d panes; no jump target", session_id, name, len(matches))
             resolved[session_id] = None
             continue
         resolved[session_id] = matches[0]
@@ -177,10 +184,15 @@ def read_jump_token(path: Path) -> str | None:
     """The shared fleet-jump credential, stripped, or `None` when unavailable.
 
     Never logged: the path and the exception are safe, the token is not.
+
+    `ValueError` is caught alongside `OSError` because `read_text(encoding=...)`
+    raises `UnicodeDecodeError` — a `ValueError`, not an `OSError` — on a file
+    that is not valid UTF-8. Unhandled, that would surface as a 500 where the
+    caller's contract promises a 503.
     """
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError as err:
+    except (OSError, ValueError) as err:
         logger.debug("cannot read jump token %s: %s", path, err)
         return None
     token = content.strip()
@@ -197,7 +209,7 @@ def perform_jump(pane_id: str, token: str) -> None:
     query = urllib.parse.urlencode({"pane": pane_id, "t": token})
     url = f"{JUMP_SERVER_URL}?{query}"
     try:
-        with urllib.request.urlopen(url, timeout=JUMP_TIMEOUT_SECONDS) as response:
+        with _JUMP_OPENER.open(url, timeout=JUMP_TIMEOUT_SECONDS) as response:
             status = response.status
     except urllib.error.HTTPError as err:
         raise RuntimeError(f"jump server returned HTTP {err.code}") from err

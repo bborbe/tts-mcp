@@ -1240,6 +1240,42 @@ class TestReplayHistory:
         assert client.post(f"/jump/{message_id}").status_code == 409
         assert activated == []
 
+    def test_jump_reports_an_unreadable_credential_as_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A missing credential is the server's problem, not the caller's.
+
+        503 rather than 409: nothing about the message or the pane is wrong, so
+        telling the operator "no pane to jump to" would send them hunting the
+        wrong thing.
+        """
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: "395")
+        monkeypatch.setattr("src.server.read_jump_token", lambda _path: None)
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        assert client.post(f"/jump/{message_id}").status_code == 503
+
+    def test_jump_reports_a_jump_server_failure_as_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A reachable pane and credential, but the jump server refuses — 502."""
+        sid = "94a82c9a-0f03-4f2e-b0e2-48f9e18af19d"
+        monkeypatch.setattr("src.server.pane_for", lambda _sid, _dir: "395")
+        monkeypatch.setattr("src.server.read_jump_token", lambda _path: "token")
+
+        def refuse(_pane: str, _token: str) -> None:
+            raise RuntimeError("jump server returned HTTP 403")
+
+        monkeypatch.setattr("src.server.perform_jump", refuse)
+
+        state = _make_state()
+        client = TestClient(_make_app(state))
+        message_id = client.post("/say", json={"text": "Hello", "session_id": sid}).json()["message_id"]
+
+        response = client.post(f"/jump/{message_id}")
+        assert response.status_code == 502
+        assert "403" in response.json()["detail"]
+
     def test_replay_does_not_evict_originals_from_the_window(self) -> None:
         state = _make_state()
         client = TestClient(_make_app(state))
