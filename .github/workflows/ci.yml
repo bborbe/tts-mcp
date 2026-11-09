@@ -12,9 +12,14 @@ on:
 
 jobs:
   test:
-    # Apple Silicon runner: mlx-audio (MLX/Metal) and sounddevice (PortAudio) are
-    # macOS/arm64-only, and src/ imports them at module load, so tests need them installed.
-    runs-on: macos-14
+    # Linux runner. This fork has no macOS runner entitlement: every macos-14 run is
+    # cancelled before a step starts ("The configuration 'macos-14-arm64-us-default'
+    # is not supported") and `test` is a required check, so no PR could merge at all.
+    # mlx-audio (MLX) is Apple-only and cannot be installed here, so pyproject marks
+    # it darwin-only and tests/conftest.py supplies a placeholder for the tests that
+    # import src.tts; no test calls into MLX — each injects its own loader.
+    # sounddevice still needs the PortAudio shared library, a system package on Linux.
+    runs-on: ubuntu-latest
     timeout-minutes: 25
 
     steps:
@@ -22,7 +27,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install PortAudio (sounddevice native dependency)
-        run: brew install portaudio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libportaudio2
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
