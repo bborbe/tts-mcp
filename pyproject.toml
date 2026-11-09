@@ -5,7 +5,11 @@ description = "A Python CLI application"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git",
+    # MLX is Apple-silicon only, so the package is marked darwin-only: CI runs the
+    # test suite on Linux, where this dependency cannot be resolved at all. The
+    # tests never call into it (each injects its own model loader), and
+    # tests/conftest.py supplies a placeholder so `import src.tts` works there.
+    "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git ; sys_platform == 'darwin'",
     "tiktoken>=0.7.0",
     "sounddevice>=0.4.6",
     "numpy>=1.26.0",
