@@ -1,5 +1,6 @@
 """Tests for parsing the server's engine declarations from config.yaml."""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -335,3 +336,93 @@ class TestSamplingKeys:
 
         with pytest.raises(ValueError, match="seed in config.yaml must be an integer"):
             _parse_server_config()
+
+    def test_temperature_at_or_below_zero_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_config(tmp_path)
+        config["temperature"] = 0
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="greater than 0"):
+            _parse_server_config()
+
+    def test_temperature_above_two_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_config(tmp_path)
+        config["temperature"] = 3
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="at most 2"):
+            _parse_server_config()
+
+    def test_negative_seed_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_config(tmp_path)
+        config["seed"] = -1
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="must not be negative"):
+            _parse_server_config()
+
+
+class TestLanguageValidationAtStartup:
+    """The language check aborts on a bad value but not on an unreadable model."""
+
+    def _state(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        default_engine: str,
+        qwen_language: str,
+        qwen_languages: tuple[str, ...] = ("English",),
+        corrupt: bool = False,
+        missing: bool = False,
+    ) -> Any:
+        qwen_dir = tmp_path / "qwen"
+        if not missing:
+            qwen_dir.mkdir()
+            if corrupt:
+                (qwen_dir / "config.json").write_text("{not json")
+            else:
+                talker: dict[str, object] = {
+                    "spk_id": {"ryan": 3061},
+                    "codec_language_id": {name: 2050 for name in qwen_languages},
+                }
+                (qwen_dir / "config.json").write_text(json.dumps({"talker_config": talker}))
+
+        vox_dir = tmp_path / "vox"
+        (vox_dir / "voice_embedding").mkdir(parents=True)
+        (vox_dir / "voice_embedding" / "casual_female.safetensors").write_text("x")
+
+        config = _base_config(tmp_path)
+        del config["engine"]
+        del config["model"]
+        config["default_engine"] = default_engine
+        config["default_voice"] = "ryan" if default_engine == QWEN3 else "casual_female"
+        config["engines"] = {
+            QWEN3: {"model": str(qwen_dir), "language": qwen_language, "default_voice": "ryan"},
+            VOXTRAL: {"model": str(vox_dir), "default_voice": "casual_female"},
+        }
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+        return _build_server_state(_parse_server_config())
+
+    def test_unknown_language_on_default_engine_aborts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(ValueError, match="Klingon"):
+            self._state(tmp_path, monkeypatch, default_engine=QWEN3, qwen_language="Klingon")
+
+    def test_unknown_language_on_non_default_engine_aborts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(ValueError, match="Klingon"):
+            self._state(tmp_path, monkeypatch, default_engine=VOXTRAL, qwen_language="Klingon")
+
+    def test_known_language_starts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state = self._state(tmp_path, monkeypatch, default_engine=QWEN3, qwen_language="English")
+
+        assert state is not None
+
+    def test_corrupt_model_config_on_non_default_engine_does_not_abort(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state = self._state(tmp_path, monkeypatch, default_engine=VOXTRAL, qwen_language="English", corrupt=True)
+
+        assert state is not None
+
+    def test_missing_model_config_on_non_default_engine_does_not_abort(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        state = self._state(tmp_path, monkeypatch, default_engine=VOXTRAL, qwen_language="English", missing=True)
+
+        assert state is not None

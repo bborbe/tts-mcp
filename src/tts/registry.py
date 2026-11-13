@@ -45,8 +45,8 @@ class EngineSpec:
     kind: str
     model_path: str
     language: str | None
-    temperature: float | None = None
-    seed: int | None = None
+    temperature: float | None
+    seed: int | None
 
 
 @dataclasses.dataclass(frozen=True)

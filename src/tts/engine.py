@@ -30,6 +30,15 @@ ENGINE_KINDS = (VOXTRAL, QWEN3)
 AUTO_LANGUAGE = "auto"
 
 
+class UnsupportedLanguageError(ValueError):
+    """Raised when the configured language is not one the model declares.
+
+    Distinct from the ValueError a malformed or missing ``config.json`` raises:
+    this one means the *configuration* is wrong and must abort startup, while an
+    unreadable model stays an availability problem the caller may tolerate.
+    """
+
+
 def _load_talker_config(model_dir: Path) -> dict[str, object]:
     """Load ``talker_config`` from the model's config.json.
 
@@ -285,8 +294,9 @@ class Qwen3Engine:
 
         Raises:
             FileNotFoundError: If the model's config.json is missing.
-            ValueError: If the configured language is neither ``auto`` nor one
-                of the model's declared ``codec_language_id`` keys.
+            ValueError: If the model declares no ``codec_language_id`` mapping.
+            UnsupportedLanguageError: If the configured language is neither
+                ``auto`` nor one of the model's declared ``codec_language_id`` keys.
         """
         if self._language.lower() == AUTO_LANGUAGE:
             return
@@ -303,7 +313,7 @@ class Qwen3Engine:
             return
 
         msg = f"Unsupported language {self._language!r} for this model. Accepted: {', '.join(sorted(accepted))} (or '{AUTO_LANGUAGE}')"
-        raise ValueError(msg)
+        raise UnsupportedLanguageError(msg)
 
     def generate(
         self,

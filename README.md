@@ -182,8 +182,8 @@ port: 12000
 |-----|-------------|
 | `engine` | **Required** in the single-engine form. Model family: `voxtral` or `qwen3`. No default — a missing value is an error. Mutually exclusive with `engines` |
 | `language` | Required by `qwen3` (e.g. `English`, `German`); rejected by `voxtral`. Validated at startup against the model's `codec_language_id` — an unknown value is an error rather than a silent fallback to no language conditioning. `auto` is accepted and deliberately disables conditioning |
-| `temperature` | Optional `qwen3` sampling temperature (the model default is `0.9`). Omit it to keep the model's own default. Lower values make the draw less degenerate at the cost of expressiveness |
-| `seed` | Optional `qwen3` RNG seed. Omit it for an unseeded draw; set it to make generation reproducible (the same text and seed produce identical audio) |
+| `temperature` | Optional `qwen3` sampling temperature, greater than 0 and at most 2 (the model default is `0.9`). Omit it to keep the model's own default. Lower values make the draw less degenerate at the cost of expressiveness |
+| `seed` | Optional `qwen3` RNG seed, a non-negative integer. Omit it for an unseeded draw; set it to make generation reproducible (the same text and seed produce identical audio) |
 | `model` | Path to the downloaded MLX model directory |
 | `engines` | Alternative to `engine`/`model`/`language`: declare several engines and pick one per request (see below) |
 | `default_engine` | Engine used by requests that name none. Required when `engines` declares more than one |

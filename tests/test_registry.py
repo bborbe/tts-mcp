@@ -17,8 +17,8 @@ from src.tts import (
 
 def _specs() -> dict[str, EngineSpec]:
     return {
-        VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="/models/voxtral", language=None),
-        QWEN3: EngineSpec(kind=QWEN3, model_path="/models/qwen3", language="English"),
+        VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="/models/voxtral", language=None, temperature=None, seed=None),
+        QWEN3: EngineSpec(kind=QWEN3, model_path="/models/qwen3", language="English", temperature=None, seed=None),
     }
 
 
@@ -180,7 +180,7 @@ class TestDeclaredEngines:
         assert registry.spec("piper") is None
 
     def test_bad_language_surfaces_from_build_engine(self) -> None:
-        specs = {VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="/m", language="English")}
+        specs = {VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="/m", language="English", temperature=None, seed=None)}
         registry = EngineRegistry(specs, loader=_CountingLoader())
 
         with pytest.raises(ValueError, match="not supported by the voxtral engine"):

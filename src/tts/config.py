@@ -79,17 +79,25 @@ def parse_sampling(settings: dict[str, object], prefix: str) -> tuple[float | No
         what keeps an unconfigured engine on the model's own sampling defaults.
 
     Raises:
-        ValueError: If either key has the wrong type.
+        ValueError: If either key has the wrong type or is out of range.
     """
     temperature = settings.get("temperature")
-    if temperature is not None and (isinstance(temperature, bool) or not isinstance(temperature, int | float)):
-        msg = f"{prefix}temperature in config.yaml must be a number"
-        raise ValueError(msg)
+    if temperature is not None:
+        if isinstance(temperature, bool) or not isinstance(temperature, int | float):
+            msg = f"{prefix}temperature in config.yaml must be a number"
+            raise ValueError(msg)
+        if not 0 < temperature <= 2:
+            msg = f"{prefix}temperature in config.yaml must be greater than 0 and at most 2 (got {temperature})"
+            raise ValueError(msg)
 
     seed = settings.get("seed")
-    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
-        msg = f"{prefix}seed in config.yaml must be an integer"
-        raise ValueError(msg)
+    if seed is not None:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            msg = f"{prefix}seed in config.yaml must be an integer"
+            raise ValueError(msg)
+        if seed < 0:
+            msg = f"{prefix}seed in config.yaml must not be negative (got {seed})"
+            raise ValueError(msg)
 
     return (None if temperature is None else float(temperature), seed)
 

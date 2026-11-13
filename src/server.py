@@ -45,6 +45,7 @@ from src.tts import (
     LoadedEngine,
     PlaybackJob,
     TTSEngine,
+    UnsupportedLanguageError,
     build_engine,
     clean_text,
     default_output_device_id,
@@ -1656,8 +1657,8 @@ class _EngineConfig:
     language: str | None
     default_voice: str
     allowed_voices: tuple[str, ...]
-    temperature: float | None = None
-    seed: int | None = None
+    temperature: float | None
+    seed: int | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1941,12 +1942,12 @@ def _discover_engine_voices(cfg: _ServerConfig) -> tuple[dict[str, list[str]], d
     voices_by_engine: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
 
-    # Config errors abort startup for every engine, default or not: a `language`
-    # the model cannot condition on would otherwise only be logged and the engine
-    # would keep answering with silently degraded output. Model *availability*
-    # stays non-fatal for a non-default engine (the loop below) — an engine whose
-    # model was never downloaded must not take the server down for everyone else,
-    # so a missing model config is deferred to that loop.
+    # A *configured* language the model cannot condition on aborts startup for
+    # every engine, default or not: it would otherwise only be logged and the
+    # engine would keep answering with silently degraded output. An unreadable
+    # model (missing or corrupt config.json) is not a config error — it stays an
+    # availability problem, decided by the discovery loop below, so declaring an
+    # engine whose model was never downloaded cannot take the server down.
     engines: dict[str, TTSEngine] = {}
     for engine_cfg in cfg.engines:
         engine = build_engine(
@@ -1958,9 +1959,9 @@ def _discover_engine_voices(cfg: _ServerConfig) -> tuple[dict[str, list[str]], d
         engines[engine_cfg.kind] = engine
         try:
             engine.validate_language(Path(engine_cfg.model_path))
-        except ValueError:
+        except UnsupportedLanguageError:
             raise
-        except FileNotFoundError:
+        except (FileNotFoundError, ValueError):
             continue
 
     for engine_cfg in cfg.engines:

@@ -28,6 +28,7 @@ from src.tts.engine import (
     VOXTRAL,
     Qwen3Engine,
     TTSEngine,
+    UnsupportedLanguageError,
     VoxtralEngine,
     build_engine,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "TTSEngine",
     "TTSModel",
     "TimeStretcher",
+    "UnsupportedLanguageError",
     "VoxtralEngine",
     "audio_worker",
     "audio_worker_from_model_id",
