@@ -27,6 +27,53 @@ VOXTRAL = "voxtral"
 QWEN3 = "qwen3"
 ENGINE_KINDS = (VOXTRAL, QWEN3)
 
+AUTO_LANGUAGE = "auto"
+
+
+class UnsupportedLanguageError(ValueError):
+    """Raised when the configured language is not one the model declares.
+
+    Distinct from the ValueError a malformed or missing ``config.json`` raises:
+    this one means the *configuration* is wrong and must abort startup, while an
+    unreadable model stays an availability problem the caller may tolerate.
+    """
+
+
+def _load_talker_config(model_dir: Path) -> dict[str, object]:
+    """Load ``talker_config`` from the model's config.json.
+
+    Reading from disk rather than from a loaded model keeps both voice discovery
+    and language validation available before the MLX model exists.
+
+    Args:
+        model_dir: Path to the model directory.
+
+    Returns:
+        The model's ``talker_config`` mapping.
+
+    Raises:
+        FileNotFoundError: If config.json is missing.
+        ValueError: If config.json is not a mapping or declares no talker_config.
+    """
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        msg = f"No config.json found in {model_dir}"
+        raise FileNotFoundError(msg)
+
+    with config_path.open() as f:
+        loaded: object = json.load(f)
+
+    if not isinstance(loaded, dict):
+        msg = f"Invalid {config_path}: expected a mapping, got {type(loaded).__name__}"
+        raise ValueError(msg)
+    raw = cast(dict[str, object], loaded)
+
+    talker_config = raw.get("talker_config")
+    if not isinstance(talker_config, dict):
+        msg = f"No 'talker_config' mapping in {config_path}"
+        raise ValueError(msg)
+    return cast(dict[str, object], talker_config)
+
 
 class TTSEngine(Protocol):
     """Model-family-specific voice discovery and generation dispatch."""
@@ -42,6 +89,10 @@ class TTSEngine(Protocol):
 
     def validate_model(self, model: TTSModel, model_id: str) -> None:
         """Raise RuntimeError if the loaded model cannot be driven by this engine."""
+        ...
+
+    def validate_language(self, model_dir: Path) -> None:
+        """Raise ValueError if the configured language cannot drive this model."""
         ...
 
     def generate(
@@ -103,6 +154,13 @@ class VoxtralEngine:
             msg = f"Model {model_id} does not support generation (engine: {VOXTRAL})"
             raise RuntimeError(msg)
 
+    def validate_language(self, model_dir: Path) -> None:
+        """No-op: the Voxtral engine takes no language.
+
+        Args:
+            model_dir: Unused — Voxtral voices are language-agnostic embeddings.
+        """
+
     def generate(
         self,
         model: TTSModel,
@@ -140,12 +198,16 @@ class VoxtralEngine:
 class Qwen3Engine:
     """Qwen3-TTS CustomVoice: speakers from config.json, ``generate_custom_voice``."""
 
-    def __init__(self, language: str) -> None:
+    def __init__(self, language: str, *, temperature: float | None = None, seed: int | None = None) -> None:
         """Initialize the engine.
 
         Args:
             language: Language name passed to the model (e.g. "English", "German").
                 Required — Qwen3 has no safe default.
+            temperature: Sampling temperature. None keeps the model's own
+                default (0.9), so an unconfigured engine behaves exactly as before.
+            seed: Seed applied to the process RNG before each generation. None
+                leaves the draw unseeded, as before.
 
         Raises:
             ValueError: If language is empty.
@@ -154,6 +216,8 @@ class Qwen3Engine:
             msg = "'language' is required in config.yaml for the qwen3 engine"
             raise ValueError(msg)
         self._language = language
+        self._temperature = temperature
+        self._seed = seed
 
     @property
     def kind(self) -> str:
@@ -164,6 +228,16 @@ class Qwen3Engine:
     def language(self) -> str:
         """Language passed to the model on every generation."""
         return self._language
+
+    @property
+    def temperature(self) -> float | None:
+        """Configured sampling temperature, or None for the model default."""
+        return self._temperature
+
+    @property
+    def seed(self) -> int | None:
+        """Configured RNG seed, or None for an unseeded draw."""
+        return self._seed
 
     def discover_voices(self, model_dir: Path) -> list[str]:
         """List speakers from ``talker_config.spk_id`` in the model's config.json.
@@ -182,28 +256,10 @@ class Qwen3Engine:
             FileNotFoundError: If config.json is missing.
             ValueError: If the config declares no speakers.
         """
-        config_path = model_dir / "config.json"
-        if not config_path.exists():
-            msg = f"No config.json found in {model_dir}"
-            raise FileNotFoundError(msg)
-
-        with config_path.open() as f:
-            loaded: object = json.load(f)
-
-        if not isinstance(loaded, dict):
-            msg = f"Invalid {config_path}: expected a mapping, got {type(loaded).__name__}"
-            raise ValueError(msg)
-        raw = cast(dict[str, object], loaded)
-
-        talker_config = raw.get("talker_config")
-        if not isinstance(talker_config, dict):
-            msg = f"No 'talker_config' mapping in {config_path}"
-            raise ValueError(msg)
-        talker = cast(dict[str, object], talker_config)
-
+        talker = _load_talker_config(model_dir)
         spk_id = talker.get("spk_id")
         if not isinstance(spk_id, dict) or not spk_id:
-            msg = f"No speakers declared under 'talker_config.spk_id' in {config_path}"
+            msg = f"No speakers declared under 'talker_config.spk_id' in {model_dir / 'config.json'}"
             raise ValueError(msg)
         speakers = cast(dict[str, object], spk_id)
 
@@ -223,6 +279,41 @@ class Qwen3Engine:
         if method is None:
             msg = f"Model {model_id} does not support generate_custom_voice (engine: {QWEN3}). Use a Qwen3-TTS CustomVoice model."
             raise RuntimeError(msg)
+
+    def validate_language(self, model_dir: Path) -> None:
+        """Reject a language the model cannot condition on.
+
+        ``generate_custom_voice`` looks the language up in ``codec_language_id``
+        case-insensitively and, on a miss, leaves ``language_id`` unset — which
+        silently switches to the ``codec_nothink_id`` prefill and lets the model
+        infer the language from the text. A typo therefore degrades the output
+        instead of failing, so it is rejected here instead.
+
+        Args:
+            model_dir: Path to the model directory.
+
+        Raises:
+            FileNotFoundError: If the model's config.json is missing.
+            ValueError: If the model declares no ``codec_language_id`` mapping.
+            UnsupportedLanguageError: If the configured language is neither
+                ``auto`` nor one of the model's declared ``codec_language_id`` keys.
+        """
+        if self._language.lower() == AUTO_LANGUAGE:
+            return
+
+        talker = _load_talker_config(model_dir)
+        codec_language_id = talker.get("codec_language_id")
+        if not isinstance(codec_language_id, dict) or not codec_language_id:
+            msg = f"No languages declared under 'talker_config.codec_language_id' in {model_dir / 'config.json'}"
+            raise ValueError(msg)
+        languages = cast(dict[str, object], codec_language_id)
+
+        accepted = {name.lower() for name in languages}
+        if self._language.lower() in accepted:
+            return
+
+        msg = f"Unsupported language {self._language!r} for this model. Accepted: {', '.join(sorted(accepted))} (or '{AUTO_LANGUAGE}')"
+        raise UnsupportedLanguageError(msg)
 
     def generate(
         self,
@@ -247,6 +338,11 @@ class Qwen3Engine:
             Iterator over generation results.
         """
         custom_voice_model = cast(CustomVoiceModel, model)
+        if self._seed is not None:
+            self._seed_process_rng(self._seed)
+        sampling: dict[str, object] = {}
+        if self._temperature is not None:
+            sampling["temperature"] = self._temperature
         if stream:
             return custom_voice_model.generate_custom_voice(
                 text=text,
@@ -255,37 +351,68 @@ class Qwen3Engine:
                 instruct=instruct,
                 stream=True,
                 streaming_interval=streaming_interval,
+                **sampling,
             )
         return custom_voice_model.generate_custom_voice(
             text=text,
             speaker=voice,
             language=self._language,
             instruct=instruct,
+            **sampling,
         )
 
+    def _seed_process_rng(self, seed: int) -> None:
+        """Seed MLX's process RNG before a generation.
 
-def build_engine(kind: str, language: str | None) -> TTSEngine:
+        ``generate_custom_voice`` has no ``seed`` parameter — the codec tokens are
+        drawn by ``mx.random.categorical`` — so the configured seed is applied to
+        the process RNG immediately before the call. Called from ``generate``,
+        which runs on the audio worker thread that also drives the model.
+
+        Args:
+            seed: The configured seed.
+        """
+        import mlx.core as mx  # local import: keeps this module importable without MLX
+
+        mx.random.seed(seed)
+
+
+def build_engine(
+    kind: str,
+    language: str | None,
+    *,
+    temperature: float | None = None,
+    seed: int | None = None,
+) -> TTSEngine:
     """Build the engine named by the config's ``engine:`` key.
 
     Args:
         kind: Engine identifier — one of ENGINE_KINDS.
         language: Language for the qwen3 engine; must be None for voxtral.
+        temperature: Sampling temperature for the qwen3 engine; must be None for
+            voxtral. None keeps the model's own default.
+        seed: RNG seed for the qwen3 engine; must be None for voxtral. None
+            leaves the draw unseeded.
 
     Returns:
         The engine implementation for that model family.
 
     Raises:
-        ValueError: If kind is unknown, or language is missing or superfluous.
+        ValueError: If kind is unknown, or a setting is missing or superfluous
+            for that engine.
     """
     if kind == VOXTRAL:
         if language is not None:
             msg = "'language' is not supported by the voxtral engine"
+            raise ValueError(msg)
+        if temperature is not None or seed is not None:
+            msg = "'temperature' and 'seed' are not supported by the voxtral engine"
             raise ValueError(msg)
         return VoxtralEngine()
     if kind == QWEN3:
         if language is None:
             msg = "'language' is required in config.yaml for the qwen3 engine"
             raise ValueError(msg)
-        return Qwen3Engine(language)
+        return Qwen3Engine(language, temperature=temperature, seed=seed)
     msg = f"Unknown engine '{kind}' in config.yaml. Supported: {', '.join(ENGINE_KINDS)}"
     raise ValueError(msg)

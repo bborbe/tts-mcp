@@ -181,7 +181,9 @@ port: 12000
 | Key | Description |
 |-----|-------------|
 | `engine` | **Required** in the single-engine form. Model family: `voxtral` or `qwen3`. No default — a missing value is an error. Mutually exclusive with `engines` |
-| `language` | Required by `qwen3` (e.g. `English`, `German`); rejected by `voxtral` |
+| `language` | Required by `qwen3` (e.g. `English`, `German`); rejected by `voxtral`. Validated at startup against the model's `codec_language_id` — an unknown value is an error rather than a silent fallback to no language conditioning. `auto` is accepted and deliberately disables conditioning |
+| `temperature` | Optional `qwen3` sampling temperature, greater than 0 and at most 2 (the model default is `0.9`). Omit it to keep the model's own default. Lower values make the draw less degenerate at the cost of expressiveness |
+| `seed` | Optional `qwen3` RNG seed, a non-negative integer. Omit it for an unseeded draw; set it to make generation reproducible (the same text and seed produce identical audio) |
 | `model` | Path to the downloaded MLX model directory |
 | `engines` | Alternative to `engine`/`model`/`language`: declare several engines and pick one per request (see below) |
 | `default_engine` | Engine used by requests that name none. Required when `engines` declares more than one |
@@ -212,9 +214,11 @@ default_engine: qwen3
 engines:
   qwen3:
     model: /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit
-    language: German
+    language: English
     default_voice: ryan
     allowed_voices: [ryan]
+    temperature: 0.6
+    seed: 42
   voxtral:
     model: /path/to/Voxtral-4B-TTS-2603-mlx-6bit
     default_voice: casual_male
@@ -226,6 +230,10 @@ sample_rate: 24000   # global — every engine must agree
 Callers then pass `engine` to `POST /say` (or the `say` MCP tool). Omitting it uses `default_engine`, so existing
 callers are unaffected. There is no inference from the voice name: a voice must belong to the engine named in the
 request, and `GET /voices` groups voices per engine so you can see which is which.
+
+`temperature` and `seed` are per-engine too. Both are optional and both are omitted from the model call when unset, so
+an unconfigured engine samples exactly as it did before. Set `seed` to make a run reproducible — useful for
+reproducing a garbled utterance and checking whether a different `temperature` fixes it.
 
 **Models load lazily.** Only `default_engine` is loaded at startup. Another engine's model is loaded the first time a
 request asks for it — so if every caller uses the default, exactly one model is ever resident. That first request waits

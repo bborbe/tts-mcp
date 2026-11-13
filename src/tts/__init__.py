@@ -7,6 +7,7 @@ from src.tts.config import (
     discover_models,
     load_config,
     make_output_path,
+    parse_sampling,
     resolve_config_path,
 )
 from src.tts.device import (
@@ -27,6 +28,7 @@ from src.tts.engine import (
     VOXTRAL,
     Qwen3Engine,
     TTSEngine,
+    UnsupportedLanguageError,
     VoxtralEngine,
     build_engine,
 )
@@ -95,6 +97,7 @@ __all__ = [
     "TTSEngine",
     "TTSModel",
     "TimeStretcher",
+    "UnsupportedLanguageError",
     "VoxtralEngine",
     "audio_worker",
     "audio_worker_from_model_id",
@@ -111,6 +114,7 @@ __all__ = [
     "make_output_path",
     "normalize_chunks",
     "normalize_stream",
+    "parse_sampling",
     "play_audio",
     "play_chunks",
     "play_stream",

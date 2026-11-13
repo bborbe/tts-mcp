@@ -37,7 +37,7 @@ from src.tts import (
 )
 
 DEFAULT_SPECS = {
-    VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="test-model-path", language=None),
+    VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="test-model-path", language=None, temperature=None, seed=None),
 }
 
 
@@ -78,7 +78,7 @@ def _make_state(
     if voices_by_engine is None:
         voices_by_engine = {default_engine: voices}
     if registry is None:
-        specs = {VOXTRAL: EngineSpec(kind=VOXTRAL, model_path=model_path, language=None)}
+        specs = {VOXTRAL: EngineSpec(kind=VOXTRAL, model_path=model_path, language=None, temperature=None, seed=None)}
         registry = EngineRegistry(specs, loader=lambda _path: MagicMock())
     if preload_model and not registry.is_loaded(default_engine):
         registry.preload(default_engine, LoadedEngine(engine=VoxtralEngine(), model=MagicMock()))
@@ -250,8 +250,8 @@ def _multi_engine_state(
 ) -> ServerState:
     """State declaring both engines, with only the default preloaded."""
     specs = {
-        VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="voxtral-path", language=None),
-        QWEN3: EngineSpec(kind=QWEN3, model_path="qwen3-path", language="English"),
+        VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="voxtral-path", language=None, temperature=None, seed=None),
+        QWEN3: EngineSpec(kind=QWEN3, model_path="qwen3-path", language="English", temperature=None, seed=None),
     }
     registry = EngineRegistry(specs, loader=loader or (lambda _path: MagicMock()))
     return _make_state(
