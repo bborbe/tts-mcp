@@ -1,6 +1,8 @@
 """Tests for the pluggable TTS engines."""
 
 import json
+import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -32,6 +34,23 @@ def _write_qwen3_language_config(model_dir: Path, languages: list[str] | None) -
     if languages is not None:
         talker_config["codec_language_id"] = {name.lower(): 2050 + index for index, name in enumerate(languages)}
     (model_dir / "config.json").write_text(json.dumps({"talker_config": talker_config}))
+
+
+def _stub_mlx_random(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Install a stub ``mlx.core`` so the RNG seeding can be observed without MLX.
+
+    MLX is macOS/arm64-only, so importing it directly would fail on CI. The
+    engine imports it lazily at call time, so a stub in ``sys.modules`` is what
+    the import resolves to.
+
+    Returns:
+        The list the stubbed ``mx.random.seed`` appends each seed to.
+    """
+    seeded: list[int] = []
+    core = types.SimpleNamespace(random=types.SimpleNamespace(seed=seeded.append))
+    monkeypatch.setitem(sys.modules, "mlx", types.SimpleNamespace(core=core))
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    return seeded
 
 
 class TestBuildEngine:
@@ -155,10 +174,7 @@ class TestQwen3Sampling:
         assert "temperature" not in model.generate_custom_voice.call_args.kwargs
 
     def test_seed_seeds_the_process_rng(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import mlx.core as mx
-
-        seeded: list[int] = []
-        monkeypatch.setattr(mx.random, "seed", seeded.append)
+        seeded = _stub_mlx_random(monkeypatch)
         model = MagicMock()
 
         Qwen3Engine("English", seed=42).generate(model, "hi", "ryan", None, stream=False, streaming_interval=1.0)
@@ -166,10 +182,7 @@ class TestQwen3Sampling:
         assert seeded == [42]
 
     def test_no_seed_leaves_the_rng_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import mlx.core as mx
-
-        seeded: list[int] = []
-        monkeypatch.setattr(mx.random, "seed", seeded.append)
+        seeded = _stub_mlx_random(monkeypatch)
         model = MagicMock()
 
         Qwen3Engine("English").generate(model, "hi", "ryan", None, stream=False, streaming_interval=1.0)
