@@ -67,6 +67,33 @@ def load_config() -> dict[str, Any]:
     return cast(dict[str, Any], raw)
 
 
+def parse_sampling(settings: dict[str, object], prefix: str) -> tuple[float | None, int | None]:
+    """Parse the optional ``temperature`` and ``seed`` keys.
+
+    Args:
+        settings: Mapping holding the keys — the top level or one engine block.
+        prefix: Key prefix for error messages, e.g. ``"engines.qwen3."``.
+
+    Returns:
+        The temperature and the seed, each None when its key is absent. None is
+        what keeps an unconfigured engine on the model's own sampling defaults.
+
+    Raises:
+        ValueError: If either key has the wrong type.
+    """
+    temperature = settings.get("temperature")
+    if temperature is not None and (isinstance(temperature, bool) or not isinstance(temperature, int | float)):
+        msg = f"{prefix}temperature in config.yaml must be a number"
+        raise ValueError(msg)
+
+    seed = settings.get("seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        msg = f"{prefix}seed in config.yaml must be an integer"
+        raise ValueError(msg)
+
+    return (None if temperature is None else float(temperature), seed)
+
+
 def discover_models(models_dir: Path) -> list[Path]:
     """Discover downloaded TTS models in the models directory.
 

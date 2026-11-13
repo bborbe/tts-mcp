@@ -44,6 +44,7 @@ from src.tts import (
     EngineSpec,
     LoadedEngine,
     PlaybackJob,
+    TTSEngine,
     build_engine,
     clean_text,
     default_output_device_id,
@@ -52,6 +53,7 @@ from src.tts import (
     load_config,
     make_output_path,
     normalize_chunks,
+    parse_sampling,
     play_stream,
     resolve_voice,
     restart_process_on_device_change,
@@ -1644,6 +1646,9 @@ class _EngineConfig:
         default_voice: Voice used when a request names this engine but no voice.
         allowed_voices: Voices this engine permits. Empty means no allowlist is
             declared, so every voice the engine offers stays reachable.
+        temperature: Sampling temperature for the qwen3 engine; None keeps the
+            model's own default.
+        seed: RNG seed for the qwen3 engine; None leaves the draw unseeded.
     """
 
     kind: str
@@ -1651,6 +1656,8 @@ class _EngineConfig:
     language: str | None
     default_voice: str
     allowed_voices: tuple[str, ...]
+    temperature: float | None = None
+    seed: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1744,7 +1751,19 @@ def _parse_legacy_engine(config: dict[str, object], default_voice: str) -> tuple
         msg = "'language' in config.yaml must be a string"
         raise ValueError(msg)
 
-    return (_EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=default_voice, allowed_voices=()),)
+    temperature, seed = parse_sampling(config, "")
+
+    return (
+        _EngineConfig(
+            kind=kind,
+            model_path=model_path,
+            language=language,
+            default_voice=default_voice,
+            allowed_voices=(),
+            temperature=temperature,
+            seed=seed,
+        ),
+    )
 
 
 def _parse_engine_block(kind: str, block: object, default_voice: str) -> _EngineConfig:
@@ -1793,7 +1812,17 @@ def _parse_engine_block(kind: str, block: object, default_voice: str) -> _Engine
             raise ValueError(msg)
         allowed_voices = tuple(cast(str, entry) for entry in entries)
 
-    return _EngineConfig(kind=kind, model_path=model_path, language=language, default_voice=voice, allowed_voices=allowed_voices)
+    temperature, seed = parse_sampling(settings, f"engines.{kind}.")
+
+    return _EngineConfig(
+        kind=kind,
+        model_path=model_path,
+        language=language,
+        default_voice=voice,
+        allowed_voices=allowed_voices,
+        temperature=temperature,
+        seed=seed,
+    )
 
 
 def _parse_engines(config: dict[str, object], default_voice: str) -> tuple[tuple[_EngineConfig, ...], str]:
@@ -1912,11 +1941,32 @@ def _discover_engine_voices(cfg: _ServerConfig) -> tuple[dict[str, list[str]], d
     voices_by_engine: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
 
+    # Config errors abort startup for every engine, default or not: a `language`
+    # the model cannot condition on would otherwise only be logged and the engine
+    # would keep answering with silently degraded output. Model *availability*
+    # stays non-fatal for a non-default engine (the loop below) — an engine whose
+    # model was never downloaded must not take the server down for everyone else,
+    # so a missing model config is deferred to that loop.
+    engines: dict[str, TTSEngine] = {}
+    for engine_cfg in cfg.engines:
+        engine = build_engine(
+            engine_cfg.kind,
+            engine_cfg.language,
+            temperature=engine_cfg.temperature,
+            seed=engine_cfg.seed,
+        )
+        engines[engine_cfg.kind] = engine
+        try:
+            engine.validate_language(Path(engine_cfg.model_path))
+        except ValueError:
+            raise
+        except FileNotFoundError:
+            continue
+
     for engine_cfg in cfg.engines:
         is_default = engine_cfg.kind == cfg.default_engine
         try:
-            engine = build_engine(engine_cfg.kind, engine_cfg.language)
-            voices_by_engine[engine_cfg.kind] = engine.discover_voices(Path(engine_cfg.model_path))
+            voices_by_engine[engine_cfg.kind] = engines[engine_cfg.kind].discover_voices(Path(engine_cfg.model_path))
         except Exception as exc:
             if is_default:
                 raise
@@ -1973,6 +2023,8 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
                 kind=engine_cfg.kind,
                 model_path=engine_cfg.model_path,
                 language=engine_cfg.language,
+                temperature=engine_cfg.temperature,
+                seed=engine_cfg.seed,
             )
             for engine_cfg in cfg.engines
         }

@@ -36,11 +36,17 @@ class EngineSpec:
         kind: Engine identifier — one of ENGINE_KINDS.
         model_path: Model directory or id passed to the loader.
         language: Language for the qwen3 engine; must be None for voxtral.
+        temperature: Sampling temperature for the qwen3 engine; must be None for
+            voxtral. None keeps the model's own default.
+        seed: RNG seed for the qwen3 engine; must be None for voxtral. None
+            leaves the draw unseeded.
     """
 
     kind: str
     model_path: str
     language: str | None
+    temperature: float | None = None
+    seed: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -108,7 +114,7 @@ class EngineRegistry:
             raise ValueError(msg)
 
         try:
-            engine = build_engine(spec.kind, spec.language)
+            engine = build_engine(spec.kind, spec.language, temperature=spec.temperature, seed=spec.seed)
             logger.info("Loading model for engine '%s': %s", kind, spec.model_path)
             model = self._loader(spec.model_path)
             engine.validate_model(model, spec.model_path)

@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- feat: `temperature` and `seed` are per-engine config keys for the qwen3 engine, and an unrecognised `language` now fails at startup instead of silently disabling language conditioning. Every request was sampled at the library defaults (`temperature=0.9`, unseeded), so each utterance was an independent draw and roughly one in ten degenerated — replaying re-sampled, which is why a replay usually came back clean. Both keys are threaded into `generate_custom_voice` and omitted when unset, so an unconfigured engine calls the model exactly as before; `seed` seeds MLX's process RNG rather than passing a kwarg, because `generate_custom_voice` has no `seed` parameter. Separately, `generate_custom_voice` leaves `language_id` unset when the value is missing from the model's `codec_language_id`, which falls through to the `codec_nothink_id` prefill and lets the model infer the language from the text — a typo therefore degraded output with no error. The configured language is now validated at startup against `talker_config.codec_language_id` for every configured engine (`auto` stays accepted; a missing model config still only marks a non-default engine unavailable, so an undownloaded model cannot take the server down). The README documents both keys, and the multi-engine example no longer pairs `language: German` with an English default voice.
+
 ## v0.26.2
 
 - chore: restate the do-not-merge contract exemption sentence in the required check

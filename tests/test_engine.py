@@ -27,6 +27,13 @@ def _write_qwen3_config(model_dir: Path, spk_id: dict[str, int] | None) -> None:
     (model_dir / "config.json").write_text(json.dumps({"talker_config": talker_config}))
 
 
+def _write_qwen3_language_config(model_dir: Path, languages: list[str] | None) -> None:
+    talker_config: dict[str, object] = {"spk_id": {"ryan": 3061}}
+    if languages is not None:
+        talker_config["codec_language_id"] = {name.lower(): 2050 + index for index, name in enumerate(languages)}
+    (model_dir / "config.json").write_text(json.dumps({"talker_config": talker_config}))
+
+
 class TestBuildEngine:
     """Tests for build_engine dispatch and config validation."""
 
@@ -53,6 +60,24 @@ class TestBuildEngine:
         with pytest.raises(ValueError, match="language"):
             build_engine(VOXTRAL, "English")
 
+    def test_passes_sampling_to_qwen3(self) -> None:
+        engine = build_engine(QWEN3, "English", temperature=0.6, seed=42)
+        assert isinstance(engine, Qwen3Engine)
+        assert engine.temperature == 0.6
+        assert engine.seed == 42
+
+    def test_sampling_defaults_to_none(self) -> None:
+        engine = build_engine(QWEN3, "English")
+        assert isinstance(engine, Qwen3Engine)
+        assert engine.temperature is None
+        assert engine.seed is None
+
+    def test_rejects_sampling_on_voxtral(self) -> None:
+        with pytest.raises(ValueError, match="temperature"):
+            build_engine(VOXTRAL, None, temperature=0.6)
+        with pytest.raises(ValueError, match="seed"):
+            build_engine(VOXTRAL, None, seed=42)
+
 
 class TestQwen3DiscoverVoices:
     """Tests for reading speakers out of the model's config.json."""
@@ -74,6 +99,82 @@ class TestQwen3DiscoverVoices:
         (tmp_path / "config.json").write_text(json.dumps({"other": 1}))
         with pytest.raises(ValueError, match="talker_config"):
             Qwen3Engine("English").discover_voices(tmp_path)
+
+
+class TestQwen3ValidateLanguage:
+    """Tests that a language the model cannot condition on fails loudly."""
+
+    def test_accepts_declared_language(self, tmp_path: Path) -> None:
+        _write_qwen3_language_config(tmp_path, ["English", "German"])
+        Qwen3Engine("English").validate_language(tmp_path)
+
+    def test_accepts_declared_language_case_insensitively(self, tmp_path: Path) -> None:
+        _write_qwen3_language_config(tmp_path, ["English"])
+        Qwen3Engine("english").validate_language(tmp_path)
+
+    def test_rejects_unknown_language(self, tmp_path: Path) -> None:
+        _write_qwen3_language_config(tmp_path, ["English"])
+        with pytest.raises(ValueError, match="Klingon"):
+            Qwen3Engine("Klingon").validate_language(tmp_path)
+
+    def test_rejection_names_the_accepted_set(self, tmp_path: Path) -> None:
+        _write_qwen3_language_config(tmp_path, ["English", "German"])
+        with pytest.raises(ValueError, match="english, german"):
+            Qwen3Engine("Klingon").validate_language(tmp_path)
+
+    def test_accepts_auto_without_a_language_map(self, tmp_path: Path) -> None:
+        _write_qwen3_language_config(tmp_path, None)
+        Qwen3Engine("auto").validate_language(tmp_path)
+
+    def test_rejects_missing_language_map(self, tmp_path: Path) -> None:
+        _write_qwen3_language_config(tmp_path, None)
+        with pytest.raises(ValueError, match="codec_language_id"):
+            Qwen3Engine("English").validate_language(tmp_path)
+
+    def test_voxtral_ignores_language(self, tmp_path: Path) -> None:
+        VoxtralEngine().validate_language(tmp_path)
+
+
+class TestQwen3Sampling:
+    """Tests that temperature and seed reach the model call and the RNG."""
+
+    def test_temperature_reaches_the_model_call(self) -> None:
+        model = MagicMock()
+        Qwen3Engine("English", temperature=0.6).generate(model, "hi", "ryan", None, stream=False, streaming_interval=1.0)
+        model.generate_custom_voice.assert_called_once_with(
+            text="hi",
+            speaker="ryan",
+            language="English",
+            instruct=None,
+            temperature=0.6,
+        )
+
+    def test_absent_temperature_leaves_the_call_unchanged(self) -> None:
+        model = MagicMock()
+        Qwen3Engine("English").generate(model, "hi", "ryan", None, stream=False, streaming_interval=1.0)
+        assert "temperature" not in model.generate_custom_voice.call_args.kwargs
+
+    def test_seed_seeds_the_process_rng(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mlx.core as mx
+
+        seeded: list[int] = []
+        monkeypatch.setattr(mx.random, "seed", seeded.append)
+        model = MagicMock()
+
+        Qwen3Engine("English", seed=42).generate(model, "hi", "ryan", None, stream=False, streaming_interval=1.0)
+
+        assert seeded == [42]
+
+    def test_no_seed_leaves_the_rng_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import mlx.core as mx
+
+        seeded: list[int] = []
+        monkeypatch.setattr(mx.random, "seed", seeded.append)
+        model = MagicMock()
+
+        Qwen3Engine("English").generate(model, "hi", "ryan", None, stream=False, streaming_interval=1.0)
+
+        assert seeded == []
 
 
 class TestGenerateDispatch:

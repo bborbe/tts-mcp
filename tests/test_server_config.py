@@ -284,3 +284,54 @@ class TestStartupValidatesAllowedVoices:
         assert state.allowed_voices_for(QWEN3) == ("casual_female",)
         assert state.allowed_voices_for(VOXTRAL) == ()
         assert state.engine_default_voice(VOXTRAL) == "casual_female"
+
+
+class TestSamplingKeys:
+    """The optional temperature/seed keys, in either config form."""
+
+    def test_flat_form_defaults_to_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("src.server.load_config", lambda: _base_config(tmp_path))
+
+        cfg = _parse_server_config()
+
+        assert cfg.engines[0].temperature is None
+        assert cfg.engines[0].seed is None
+
+    def test_flat_form_parses_both(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_config(tmp_path)
+        config["temperature"] = 0.6
+        config["seed"] = 42
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        cfg = _parse_server_config()
+
+        assert cfg.engines[0].temperature == 0.6
+        assert cfg.engines[0].seed == 42
+
+    def test_engine_block_parses_both(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _multi_engine_config(tmp_path)
+        config["engines"][QWEN3]["temperature"] = 0.6
+        config["engines"][QWEN3]["seed"] = 42
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        cfg = _parse_server_config()
+
+        qwen3 = next(engine for engine in cfg.engines if engine.kind == QWEN3)
+        assert qwen3.temperature == 0.6
+        assert qwen3.seed == 42
+
+    def test_non_numeric_temperature_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_config(tmp_path)
+        config["temperature"] = "warm"
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="temperature in config.yaml must be a number"):
+            _parse_server_config()
+
+    def test_non_integer_seed_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = _base_config(tmp_path)
+        config["seed"] = 1.5
+        monkeypatch.setattr("src.server.load_config", lambda: config)
+
+        with pytest.raises(ValueError, match="seed in config.yaml must be an integer"):
+            _parse_server_config()

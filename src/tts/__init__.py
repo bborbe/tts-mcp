@@ -7,6 +7,7 @@ from src.tts.config import (
     discover_models,
     load_config,
     make_output_path,
+    parse_sampling,
     resolve_config_path,
 )
 from src.tts.device import (
@@ -111,6 +112,7 @@ __all__ = [
     "make_output_path",
     "normalize_chunks",
     "normalize_stream",
+    "parse_sampling",
     "play_audio",
     "play_chunks",
     "play_stream",

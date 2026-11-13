@@ -22,6 +22,7 @@ from src.tts import (
     discover_models,
     load_config,
     make_output_path,
+    parse_sampling,
     simplify_punctuation,
     speed_from_config,
 )
@@ -47,6 +48,8 @@ class CliConfig:
 
     engine: str
     language: str | None
+    temperature: float | None
+    seed: int | None
     sample_rate: int
     save_wav: bool
     simplify_punctuation: bool
@@ -280,7 +283,7 @@ def _require(config: dict[str, object], key: str) -> object:
     return value
 
 
-def _resolve_cli_engine(config: dict[str, object]) -> tuple[str, str | None]:
+def _resolve_cli_engine(config: dict[str, object]) -> tuple[str, str | None, float | None, int | None]:
     """Pick the engine the CLI should use, from either config form.
 
     The server accepts an ``engines:`` mapping with a ``default_engine:``; the
@@ -292,7 +295,8 @@ def _resolve_cli_engine(config: dict[str, object]) -> tuple[str, str | None]:
         config: Raw config mapping.
 
     Returns:
-        The engine kind and its language (None for engines that take none).
+        The engine kind, its language (None for engines that take none), and the
+        optional sampling temperature and seed.
 
     Raises:
         ValueError: If the declaration is missing or malformed.
@@ -307,7 +311,8 @@ def _resolve_cli_engine(config: dict[str, object]) -> tuple[str, str | None]:
         if language is not None and not isinstance(language, str):
             msg = "'language' in config.yaml must be a string"
             raise ValueError(msg)
-        return engine, language
+        temperature, seed = parse_sampling(config, "")
+        return engine, language, temperature, seed
 
     if not isinstance(engines_block, dict) or not engines_block:
         msg = "'engines' in config.yaml must be a non-empty mapping of engine name to settings"
@@ -326,12 +331,14 @@ def _resolve_cli_engine(config: dict[str, object]) -> tuple[str, str | None]:
         msg = f"default_engine '{default_engine}' is not declared in 'engines'"
         raise ValueError(msg)
 
-    language = cast(dict[str, object], block).get("language")
+    settings = cast(dict[str, object], block)
+    language = settings.get("language")
     if language is not None and not isinstance(language, str):
         msg = f"engines.{default_engine}.language in config.yaml must be a string"
         raise ValueError(msg)
 
-    return default_engine, language
+    temperature, seed = parse_sampling(settings, f"engines.{default_engine}.")
+    return default_engine, language, temperature, seed
 
 
 def load_cli_config() -> CliConfig:
@@ -352,11 +359,13 @@ def load_cli_config() -> CliConfig:
         min_duration_seconds=float(cast(float, _require(config, "min_duration_seconds"))),
     )
 
-    engine, language = _resolve_cli_engine(config)
+    engine, language, temperature, seed = _resolve_cli_engine(config)
 
     return CliConfig(
         engine=engine,
         language=language,
+        temperature=temperature,
+        seed=seed,
         sample_rate=int(cast(int, _require(config, "sample_rate"))),
         save_wav=bool(_require(config, "save_wav")),
         simplify_punctuation=bool(config.get("simplify_punctuation")),
@@ -381,7 +390,8 @@ def main() -> None:
     cfg = load_cli_config()
 
     model_dir = resolve_model_dir(args.model)
-    engine = build_engine(cfg.engine, cfg.language)
+    engine = build_engine(cfg.engine, cfg.language, temperature=cfg.temperature, seed=cfg.seed)
+    engine.validate_language(Path(model_dir))
     available_voices = engine.discover_voices(Path(model_dir))
 
     voice: str = args.voice if args.voice else select_voice(available_voices)
