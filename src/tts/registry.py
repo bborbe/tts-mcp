@@ -139,6 +139,22 @@ class EngineRegistry:
         """
         self._loaded[kind] = loaded
 
+    def unload_all(self) -> list[str]:
+        """Drop every cached engine, returning the kinds that were resident.
+
+        The caller must be the thread that loaded them: MLX GPU streams are
+        thread-local, so releasing a model from another thread leaves the
+        owning thread's stream still holding it. A cached load *failure* is
+        deliberately kept — dropping it would turn every later request for a
+        broken engine into another ~20-second failed load attempt.
+
+        Returns:
+            Sorted engine kinds that had a model resident and are now dropped.
+        """
+        kinds = sorted(self._loaded)
+        self._loaded.clear()
+        return kinds
+
     def is_loaded(self, kind: str) -> bool:
         """Report whether this engine's model is resident.
 
