@@ -36,6 +36,11 @@ from src.tts.generate import (
     generate_chunks,
     iter_stream_chunks,
 )
+from src.tts.idle import (
+    DEFAULT_IDLE_UNLOAD_SECONDS,
+    IdleUnloader,
+    idle_unload_seconds_from_config,
+)
 from src.tts.normalize import (
     boost_gain,
     normalize_chunks,
@@ -75,6 +80,7 @@ from src.tts.worker import (
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "DEFAULT_IDLE_UNLOAD_SECONDS",
     "ENGINE_KINDS",
     "OUTPUT_DIR",
     "QWEN3",
@@ -86,6 +92,7 @@ __all__ = [
     "Ducker",
     "EngineRegistry",
     "EngineSpec",
+    "IdleUnloader",
     "LoadedEngine",
     "MAX_SPEED",
     "MIN_SPEED",
@@ -109,6 +116,7 @@ __all__ = [
     "discover_models",
     "ducker_from_config",
     "generate_chunks",
+    "idle_unload_seconds_from_config",
     "iter_stream_chunks",
     "load_config",
     "make_output_path",

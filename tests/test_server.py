@@ -58,6 +58,7 @@ def _make_state(
     stream: bool = False,
     streaming_interval: float = 1.0,
     streaming_warmup_seconds: float = 2.0,
+    idle_unload_seconds: float = 0.0,
     registry: EngineRegistry | None = None,
     voices_by_engine: dict[str, list[str]] | None = None,
     default_engine: str = VOXTRAL,
@@ -109,6 +110,7 @@ def _make_state(
         stream=stream,
         streaming_interval=streaming_interval,
         streaming_warmup_seconds=streaming_warmup_seconds,
+        idle_unload_seconds=idle_unload_seconds,
         ducker=ducker,
         speed=speed,
     )

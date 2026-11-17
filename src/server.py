@@ -42,6 +42,7 @@ from src.tts import (
     Ducker,
     EngineRegistry,
     EngineSpec,
+    IdleUnloader,
     LoadedEngine,
     PlaybackJob,
     TTSEngine,
@@ -51,6 +52,7 @@ from src.tts import (
     default_output_device_id,
     ducker_from_config,
     generate_chunks,
+    idle_unload_seconds_from_config,
     load_config,
     make_output_path,
     normalize_chunks,
@@ -173,6 +175,7 @@ class ServerState:
         stream: bool,
         streaming_interval: float,
         streaming_warmup_seconds: float,
+        idle_unload_seconds: float,
         ducker: Ducker,
         speed: float,
     ) -> None:
@@ -205,6 +208,8 @@ class ServerState:
             streaming_interval: Approximate seconds of audio per streamed chunk.
             streaming_warmup_seconds: Seconds buffered to measure the streaming
                 normalization gain (see normalize_stream).
+            idle_unload_seconds: Idle seconds after which the worker drops every
+                resident model. Zero disables idle unloading.
             ducker: Lowers other apps' audio around each utterance. Public
                 because the audio worker reads it when building its player.
             speed: Playback speed. Public for the same reason as ducker.
@@ -227,6 +232,7 @@ class ServerState:
         self._stream = stream
         self._streaming_interval = streaming_interval
         self._streaming_warmup_seconds = streaming_warmup_seconds
+        self._idle_unload_seconds = idle_unload_seconds
         self._ducker = ducker
         self._speed = speed
         self.work_queue: queue.Queue[WorkItem | None] = queue.Queue()
@@ -262,6 +268,11 @@ class ServerState:
     def default_engine(self) -> str:
         """Engine used by requests that name none."""
         return self._default_engine
+
+    @property
+    def idle_unload_seconds(self) -> float:
+        """Idle seconds before the worker drops resident models (0 disables)."""
+        return self._idle_unload_seconds
 
     @property
     def voices_by_engine(self) -> dict[str, list[str]]:
@@ -328,6 +339,19 @@ class ServerState:
         with self._status_lock:
             self._loaded_engines.add(engine)
             self.engine_errors.pop(engine, None)
+
+    def mark_engine_unloaded(self, engine: str) -> None:
+        """Record that an engine's model is no longer resident.
+
+        Called by the audio worker after the idle unload drops the model, so
+        /voices and the web UI report the engine as unloaded rather than
+        claiming a model that is gone.
+
+        Args:
+            engine: Engine kind whose model was dropped.
+        """
+        with self._status_lock:
+            self._loaded_engines.discard(engine)
 
     def mark_engine_failed(self, engine: str, error: str) -> None:
         """Record that an engine's model failed to load.
@@ -613,6 +637,20 @@ class ServerState:
             True while the hold is armed.
         """
         return self._hold.is_set()
+
+    def has_active_playback(self) -> bool:
+        """Report whether any message is currently playable or playing.
+
+        The idle unload consults this so a model is never dropped while its
+        audio is still being played: ``_cancel_events`` is populated by
+        begin_playback and emptied by end_playback, so an entry means a message
+        is in flight.
+
+        Returns:
+            True while at least one message holds a cancel/pause event.
+        """
+        with self._status_lock:
+            return bool(self._cancel_events)
 
     def wait_while_held(self) -> None:
         """Block the caller until the queue-wide hold is cleared.
@@ -1465,7 +1503,40 @@ def _playback_status_callbacks(
     return on_complete, on_error, on_cancel
 
 
-def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
+def _next_item(state: ServerState, idle: IdleUnloader) -> WorkItem | None:
+    """Wait for the next work item, unloading resident models when the queue stays idle.
+
+    Blocks until an item (or the shutdown None) arrives. While the queue is
+    empty the worker re-checks the idle window on each timeout; once it elapses
+    and nothing is playing, every cached model is dropped and MLX's buffers are
+    released. The next item reloads lazily through the registry, so an unloaded
+    server pays one cold load on its next utterance and nothing else.
+
+    Args:
+        state: Server state holding the work queue and engine registry.
+        idle: Idle policy, owned by this worker thread.
+
+    Returns:
+        The next work item, or None when the queue signals shutdown.
+    """
+    while True:
+        timeout = idle.seconds_until_unload()
+        if timeout is None:
+            return state.work_queue.get()
+        try:
+            item = state.work_queue.get(timeout=timeout)
+        except queue.Empty:
+            if state.has_active_playback():
+                idle.touch()
+                continue
+            for kind in idle.unload(state.registry):
+                state.mark_engine_unloaded(kind)
+            continue
+        idle.touch()
+        return item
+
+
+def _run_streaming_server_loop(state: ServerState, player: AudioPlayer, idle: IdleUnloader) -> None:
     """Process queued requests in streaming mode: play each utterance as it generates.
 
     Audio starts after the first chunk instead of after the whole utterance. When
@@ -1477,8 +1548,12 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
     settings = state.audio_settings()
     while True:
         current_item: WorkItem | None = None
+        # Cleared at the top of every iteration so no path — success, failure,
+        # or an exception after the model resolved — leaves a frame local
+        # pinning the model past an idle unload.
+        loaded: LoadedEngine | None = None
         try:
-            item = state.work_queue.get()
+            item = _next_item(state, idle)
             if item is None:
                 break
             current_item = item
@@ -1526,6 +1601,10 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer) -> None:
             done.wait()
             state.end_playback(item.message_id)
             state.work_queue.task_done()
+            # Restart the idle window from the end of the utterance, not its
+            # start: a long utterance would otherwise expire the window while
+            # it played, so every utterance would pay a reload.
+            idle.touch()
 
         except Exception as exc:
             logger.error("Audio worker caught unexpected error (recovering): %s", exc, exc_info=True)
@@ -1564,7 +1643,7 @@ def _prepare_buffered_item(state: ServerState, item: WorkItem) -> tuple[WorkItem
     return (item, chunks)
 
 
-def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
+def _run_buffered_server_loop(state: ServerState, player: AudioPlayer, idle: IdleUnloader) -> None:
     """Process queued requests in buffered mode with cross-message lookahead.
 
     Generates the full utterance (and optional loudness normalization) before
@@ -1583,7 +1662,7 @@ def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
                 playback_done = _start_playback(state, player, pending, playback_done)
                 pending = None
 
-            item = state.work_queue.get()
+            item = _next_item(state, idle)
             if item is None:
                 if playback_done is not None:
                     playback_done.wait()
@@ -1592,6 +1671,7 @@ def _run_buffered_server_loop(state: ServerState, player: AudioPlayer) -> None:
             current_item = item
             pending = _prepare_buffered_item(state, item)
             state.work_queue.task_done()
+            idle.touch()
 
         except Exception as exc:
             logger.error(
@@ -1620,18 +1700,24 @@ def server_audio_worker(state: ServerState) -> None:
     handler so unexpected exceptions are logged and the worker keeps running
     instead of dying silently.
 
+    When ``idle_unload_seconds`` is non-zero, an idle queue drops every resident
+    model (see _next_item), releasing the several GB a loaded model holds. The
+    next request reloads lazily, so the unload is invisible to callers beyond
+    one cold load.
+
     Args:
         state: Server state with work queue, engine registry, and status tracking.
     """
     if _load_default_engine(state) is None:
         return
 
+    idle = IdleUnloader(state.idle_unload_seconds)
     player = AudioPlayer(state.sample_rate, state.lead_silence_ms, state.ducker, state.speed)
     try:
         if state.stream:
-            _run_streaming_server_loop(state, player)
+            _run_streaming_server_loop(state, player, idle)
         else:
-            _run_buffered_server_loop(state, player)
+            _run_buffered_server_loop(state, player, idle)
     finally:
         player.close()
 
@@ -1679,6 +1765,7 @@ class _ServerConfig:
     stream: bool
     streaming_interval: float
     streaming_warmup_seconds: float
+    idle_unload_seconds: float
     ducker: Ducker
     speed: float
 
@@ -1915,6 +2002,7 @@ def _parse_server_config() -> _ServerConfig:
         stream=bool(_require(config, "stream")),
         streaming_interval=float(cast(float, _require(config, "streaming_interval"))),
         streaming_warmup_seconds=float(cast(float, _require(config, "streaming_warmup_seconds"))),
+        idle_unload_seconds=idle_unload_seconds_from_config(config),
         ducker=ducker_from_config(config),
         speed=speed_from_config(config),
     )
@@ -2050,6 +2138,7 @@ def _build_server_state(cfg: _ServerConfig) -> ServerState:
         stream=cfg.stream,
         streaming_interval=cfg.streaming_interval,
         streaming_warmup_seconds=cfg.streaming_warmup_seconds,
+        idle_unload_seconds=cfg.idle_unload_seconds,
         ducker=cfg.ducker,
         speed=cfg.speed,
     )

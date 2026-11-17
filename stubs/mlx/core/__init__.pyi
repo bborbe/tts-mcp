@@ -9,3 +9,7 @@ class _Random:
     def seed(seed: int) -> None: ...
 
 random: _Random
+
+def clear_cache() -> None:
+    """Release MLX's cached buffers back to the allocator."""
+    ...
