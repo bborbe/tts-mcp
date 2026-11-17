@@ -6,11 +6,18 @@ so without a placeholder every test module would fail at import before running a
 single assertion. No test calls into MLX — each one injects its own loader — so a
 placeholder whose `load` refuses to run is enough. On macOS the real package is
 found and left untouched.
+
+`sounddevice` needs the same treatment for a different reason: importing it calls
+PortAudio's `Pa_Initialize()`, which fails on a Linux runner with no audio server.
+`src.tts.player` imports it at module load, so that failure aborts collection for
+every test module too. No test plays audio — each injects its own player — so a
+stand-in that answers any attribute is enough.
 """
 
 import importlib.util
 import sys
 import types
+from unittest.mock import MagicMock
 
 
 def _install_mlx_audio_placeholder() -> None:
@@ -32,4 +39,19 @@ def _install_mlx_audio_placeholder() -> None:
     sys.modules["mlx_audio.tts.utils"] = utils
 
 
+def _install_sounddevice_placeholder() -> None:
+    """Register a placeholder sounddevice when the real module cannot initialise.
+
+    The import is the probe: sounddevice initialises PortAudio as a side effect of
+    importing, so a missing library and an unreachable audio server both surface
+    here rather than at the first call. Any failure means no test can run, and a
+    stand-in is strictly better than a collection error.
+    """
+    try:
+        import sounddevice  # noqa: F401, PLC0415 - the import itself is the probe
+    except Exception:  # PortAudioError, ImportError, or any other initialisation failure
+        sys.modules["sounddevice"] = MagicMock(name="sounddevice")
+
+
 _install_mlx_audio_placeholder()
+_install_sounddevice_placeholder()
