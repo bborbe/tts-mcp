@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## v0.28.0
 
 - feat: the server drops every resident model after `idle_unload_seconds` (default 600; `0` disables) of an empty work queue, releasing the ~3 GB a loaded Qwen3-TTS model holds. The audio worker waits on its queue with a timeout and, once the window elapses and no message is playing, drops the cached `LoadedEngine`s, calls `mx.clear_cache()` and clears `_loaded_engines` — so `/voices` reports `"loaded": false` rather than claiming a model that is gone. The next `say` reloads lazily through the registry, so an unloaded server costs one cold load (~1-3 s) on its next utterance and nothing else. The unload only runs between work items on the audio worker thread — MLX GPU streams are thread-local — so no synthesis is ever in flight, and a cached load *failure* survives the unload instead of turning every later request into another ~20-second failed load.
 
