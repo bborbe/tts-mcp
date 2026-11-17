@@ -16,11 +16,22 @@ import logging
 import time
 from collections.abc import Callable
 
-import mlx.core as mx
-
 from src.tts.registry import EngineRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _release_mlx_cache() -> None:
+    """Release MLX's cached buffers.
+
+    Imported lazily rather than at module import: MLX is macOS/arm64-only, and
+    importing this module must not fail on a platform where it is absent (CI
+    collects the test suite on Linux).
+    """
+    import mlx.core as mx  # noqa: PLC0415 - macOS/arm64-only import, must stay lazy
+
+    mx.clear_cache()
+
 
 DEFAULT_IDLE_UNLOAD_SECONDS = 600.0
 """Idle seconds before resident models are dropped (10 minutes).
@@ -72,7 +83,7 @@ class IdleUnloader:
         self,
         idle_seconds: float,
         clock: Callable[[], float] = time.monotonic,
-        clear_cache: Callable[[], None] = mx.clear_cache,
+        clear_cache: Callable[[], None] = _release_mlx_cache,
     ) -> None:
         """Start the idle clock.
 
