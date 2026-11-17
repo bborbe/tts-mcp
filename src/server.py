@@ -1548,6 +1548,10 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer, idle: Id
     settings = state.audio_settings()
     while True:
         current_item: WorkItem | None = None
+        # Cleared at the top of every iteration so no path — success, failure,
+        # or an exception after the model resolved — leaves a frame local
+        # pinning the model past an idle unload.
+        loaded: LoadedEngine | None = None
         try:
             item = _next_item(state, idle)
             if item is None:
@@ -1597,11 +1601,10 @@ def _run_streaming_server_loop(state: ServerState, player: AudioPlayer, idle: Id
             done.wait()
             state.end_playback(item.message_id)
             state.work_queue.task_done()
-            # Drop this iteration's reference to the model. The local would
-            # otherwise outlive the loop body and keep the model alive past an
-            # idle unload, which clears the registry but cannot reach a frame
-            # local — so the ~3 GB would never actually be released.
-            loaded = None
+            # Restart the idle window from the end of the utterance, not its
+            # start: a long utterance would otherwise expire the window while
+            # it played, so every utterance would pay a reload.
+            idle.touch()
 
         except Exception as exc:
             logger.error("Audio worker caught unexpected error (recovering): %s", exc, exc_info=True)
@@ -1668,6 +1671,7 @@ def _run_buffered_server_loop(state: ServerState, player: AudioPlayer, idle: Idl
             current_item = item
             pending = _prepare_buffered_item(state, item)
             state.work_queue.task_done()
+            idle.touch()
 
         except Exception as exc:
             logger.error(

@@ -1,6 +1,8 @@
 """Tests for the idle-unload policy and its wiring into the audio worker."""
 
+import gc
 import queue
+import weakref
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -41,6 +43,10 @@ class _CacheRecorder:
 
     def __call__(self) -> None:
         self.calls += 1
+
+
+class _Model:
+    """Weakref-able stand-in for a loaded model."""
 
 
 def _registry() -> EngineRegistry:
@@ -186,14 +192,32 @@ class TestUnload:
 
         assert isinstance(registry.failure(VOXTRAL), RuntimeError)
 
+    def test_unload_actually_releases_the_model(self) -> None:
+        model = _Model()
+        ref = weakref.ref(model)
+        specs = {VOXTRAL: EngineSpec(kind=VOXTRAL, model_path="/models/voxtral", language=None, temperature=None, seed=None)}
+        registry = EngineRegistry(specs, loader=lambda _path: None)
+        registry.preload(VOXTRAL, LoadedEngine(engine=VoxtralEngine(), model=cast(Any, model)))
+        unloader = IdleUnloader(60, clock=_Clock(), clear_cache=_CacheRecorder())
+
+        unloader.unload(registry)
+        del model
+        gc.collect()
+
+        # The registry was the last holder: dropping it must free the model,
+        # otherwise the memory the feature exists to release never comes back.
+        assert ref() is None
+
 
 class _ScriptedQueue:
     """Queue stand-in: raise Empty a set number of times, then return shutdown."""
 
     def __init__(self, empties: int) -> None:
         self._remaining = empties
+        self.timeouts: list[float | None] = []
 
     def get(self, timeout: float | None = None) -> None:
+        self.timeouts.append(timeout)
         if self._remaining > 0:
             self._remaining -= 1
             raise queue.Empty
@@ -261,10 +285,13 @@ class TestWorkerWiring:
         state = _make_state(idle_unload_seconds=0)
         recorder = _CacheRecorder()
         unloader = IdleUnloader(0, clock=_Clock(), clear_cache=recorder)
-        state.work_queue = cast(Any, _ScriptedQueue(0))
+        scripted = _ScriptedQueue(0)
+        state.work_queue = cast(Any, scripted)
 
         assert _next_item(state, unloader) is None
 
+        # The disabled path must block like the old code did: no timeout at all.
+        assert scripted.timeouts == [None]
         assert recorder.calls == 0
         assert state.registry.is_loaded(VOXTRAL) is True
 

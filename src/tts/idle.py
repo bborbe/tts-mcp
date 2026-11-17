@@ -11,6 +11,7 @@ asks whether the idle window has elapsed and performs the unload inline,
 between work items, where no synthesis is in flight.
 """
 
+import gc
 import logging
 import time
 from collections.abc import Callable
@@ -125,6 +126,10 @@ class IdleUnloader:
         """
         dropped = registry.unload_all()
         if dropped:
+            # MLX modules hold reference cycles, so dropping the registry's
+            # references alone does not free them; collect before releasing the
+            # buffer cache, or the memory only comes back on a later GC.
+            gc.collect()
             self._clear_cache()
             logger.info("Unloaded idle model(s) for engine(s): %s", ", ".join(dropped))
         self.touch()
